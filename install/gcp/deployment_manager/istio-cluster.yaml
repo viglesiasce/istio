@@ -6,11 +6,10 @@ resources:
 - name: my-cluster
   type: istio-cluster.jinja
   properties:
-    gkeClusterName: istio-cluster
     zone: us-central1-a
     initialNodeCount: 3
     instanceType: n1-standard-2
-    enableAutomaticSidecarInjection: true
+    enableAutomaticSidecarInjection: false
     enableMutualTLS: false
     enablePrometheus: true
     enableGrafana: true

@@ -2,12 +2,12 @@
 
 resources:
 
-- name: {{ properties['gkeClusterName'] }}
+- name: {{ CLUSTER_NAME }}
   type: container.v1.cluster
   properties:
     zone: {{ properties['zone'] }}
     cluster:
-      name: {{ properties['gkeClusterName'] }}
+      name: {{ CLUSTER_NAME }}
       initialClusterVersion: 1.9.2-gke.1
       legacyAbac:
         enabled: false
@@ -15,6 +15,7 @@ resources:
       nodeConfig:
         machineType: {{ properties["instanceType"] }}
         oauthScopes:
+        - https://www.googleapis.com/auth/trace.append
         - https://www.googleapis.com/auth/logging.write
         - https://www.googleapis.com/auth/monitoring
 
@@ -45,7 +46,7 @@ resources:
   type: compute.v1.instance
   metadata:
     dependsOn:
-    - {{ properties['gkeClusterName'] }}
+    -  {{ CLUSTER_NAME }}
   properties:
     zone: {{ properties['zone'] }}
     machineType: https://www.googleapis.com/compute/v1/projects/{{ env["project"] }}/zones/{{ properties["zone"] }}/machineTypes/{{ properties["instanceType"] }}
@@ -85,7 +86,7 @@ resources:
           export HOME=/root
           gcloud components update -q
           gcloud components install beta -q
-          gcloud container clusters get-credentials {{ properties['gkeClusterName'] }} --zone {{ properties['zone'] }}
+          gcloud container clusters get-credentials {{ CLUSTER_NAME }} --zone {{ properties['zone'] }}
           kubectl create clusterrolebinding cluster-admin-binding --clusterrole=cluster-admin --user=$(gcloud config get-value core/account)
           curl -L https://raw.githubusercontent.com/istio/istio/master/release/downloadIstioCandidate.sh | ISTIO_VERSION={{ properties['installIstioRelease'] }} sh -
           cd istio-{{ properties['installIstioRelease'] }}
@@ -144,7 +145,9 @@ resources:
           {% endif %}
 
           {% if  properties['enableZipkin'] %}
-            kubectl apply -f install/kubernetes/addons/zipkin.yaml
+            kubectl run --namespace istio-system --expose --port 9411 \
+                 --image openzipkin/zipkin-gcp:0.1.0 zipkin \
+                 --env="STORAGE_TYPE=stackdriver" --env="STACKDRIVER_PROJECT_ID={{ env['project'] }}"
           {% endif %}
 
           {% if  properties['enableServiceGraph'] %}
