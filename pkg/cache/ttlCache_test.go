@@ -12,11 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// +build !race
-
 package cache
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -42,14 +41,30 @@ func TestTTLEvicter(t *testing.T) {
 }
 
 func TestTTLEvictExpired(t *testing.T) {
-	ttl := NewTTL(5*time.Second, 0)
+	ttl := NewTTL(5*time.Second, 0).(*ttlCache)
 	testCacheEvictExpired(ttl, t)
 }
 
+type callbackRecorder struct {
+	callbacks int64
+}
+
+func (c *callbackRecorder) callback(key, value interface{}) {
+	atomic.AddInt64(&c.callbacks, 1)
+}
+
+func TestTTLEvictionCallback(t *testing.T) {
+	c := &callbackRecorder{callbacks: 0}
+	ttl := NewTTLWithCallback(50*time.Millisecond, time.Millisecond, c.callback)
+	testCacheEvicter(ttl, t)
+	if atomic.LoadInt64(&c.callbacks) != 1 {
+		t.Errorf("evictExpired() => failed to invoke EvictionCallback: got %d callbacks, wanted 1", c.callbacks)
+	}
+}
+
 func TestTTLFinalizer(t *testing.T) {
-	c := NewTTL(5*time.Second, 1*time.Millisecond).(*ttlWrapper)
-	gate := &c.evicterTerminated
-	testCacheFinalizer(gate, t)
+	ttl := NewTTL(5*time.Second, 1*time.Millisecond).(*ttlWrapper)
+	testCacheFinalizer(&ttl.evicterTerminated, t)
 }
 
 func BenchmarkTTLGet(b *testing.B) {

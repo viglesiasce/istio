@@ -20,9 +20,10 @@ import (
 
 	"istio.io/istio/mixer/pkg/adapter"
 	"istio.io/istio/mixer/pkg/config/store"
-	"istio.io/istio/mixer/pkg/il/evaluator"
-	mixerRuntime "istio.io/istio/mixer/pkg/runtime"
+	"istio.io/istio/mixer/pkg/loadshedding"
+	"istio.io/istio/mixer/pkg/runtime/config/constant"
 	"istio.io/istio/mixer/pkg/template"
+	"istio.io/istio/pkg/ctrlz"
 	"istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/probe"
 	"istio.io/istio/pkg/tracing"
@@ -48,9 +49,6 @@ type Args struct {
 	// Maximum number of goroutines in the adapter worker pool
 	AdapterWorkerPoolSize int
 
-	// Maximum number of entries in the expression cache
-	ExpressionEvalCacheSize int
-
 	// URL of the config store. Use k8s://path_to_kubeconfig or fs:// for file system. If path_to_kubeconfig is empty, in-cluster kubeconfig is used.")
 	// If this is empty (and ConfigStore isn't specified), "k8s://" will be used.
 	ConfigStoreURL string
@@ -63,13 +61,6 @@ type Args struct {
 
 	// Configuration fetch interval in seconds
 	ConfigFetchIntervalSec uint
-
-	// Attribute that is used to identify applicable scopes.
-	ConfigIdentityAttribute string
-
-	// The domain to which all values of the ConfigIdentityAttribute belong.
-	// For kubernetes services it is svc.cluster.local
-	ConfigIdentityAttributeDomain string
 
 	// The logging options to use
 	LoggingOptions *log.Options
@@ -84,8 +75,14 @@ type Args struct {
 	// The path to the file for readiness probe, similar to LivenessProbePath.
 	ReadinessProbeOptions *probe.Options
 
+	// The introspection options to use
+	IntrospectionOptions *ctrlz.Options
+
 	// Port to use for Mixer's gRPC API
 	APIPort uint16
+
+	// Address to use for Mixer's gRPC API. This setting supercedes the API port setting.
+	APIAddress string
 
 	// Port to use for exposing mixer self-monitoring information
 	MonitoringPort uint16
@@ -93,34 +90,36 @@ type Args struct {
 	// Enable profiling via web interface host:port/debug/pprof
 	EnableProfiling bool
 
-	// Enables use of pkg/runtime2, instead of pkg/runtime.
-	UseNewRuntime bool
-
 	// Enables gRPC-level tracing
 	EnableGRPCTracing bool
 
 	// If true, each request to Mixer will be executed in a single go routine (useful for debugging)
 	SingleThreaded bool
+
+	// Maximum number of entries in the check cache
+	NumCheckCacheEntries int32
+
+	LoadSheddingOptions loadshedding.Options
 }
 
-// NewArgs allocates an Args struct initialized with Mixer's default configuration.
-func NewArgs() *Args {
+// DefaultArgs allocates an Args struct initialized with Mixer's default configuration.
+func DefaultArgs() *Args {
 	return &Args{
-		APIPort:                       9091,
-		MonitoringPort:                9093,
-		MaxMessageSize:                1024 * 1024,
-		MaxConcurrentStreams:          1024,
-		APIWorkerPoolSize:             1024,
-		AdapterWorkerPoolSize:         1024,
-		ExpressionEvalCacheSize:       evaluator.DefaultCacheSize,
-		ConfigDefaultNamespace:        mixerRuntime.DefaultConfigNamespace,
-		ConfigIdentityAttribute:       "destination.service",
-		ConfigIdentityAttributeDomain: "svc.cluster.local",
-		UseNewRuntime:                 true,
-		LoggingOptions:                log.NewOptions(),
-		TracingOptions:                tracing.NewOptions(),
-		LivenessProbeOptions:          &probe.Options{},
-		ReadinessProbeOptions:         &probe.Options{},
+		APIPort:                9091,
+		MonitoringPort:         9093,
+		MaxMessageSize:         1024 * 1024,
+		MaxConcurrentStreams:   1024,
+		APIWorkerPoolSize:      1024,
+		AdapterWorkerPoolSize:  1024,
+		ConfigDefaultNamespace: constant.DefaultConfigNamespace,
+		LoggingOptions:         log.DefaultOptions(),
+		TracingOptions:         tracing.DefaultOptions(),
+		LivenessProbeOptions:   &probe.Options{},
+		ReadinessProbeOptions:  &probe.Options{},
+		IntrospectionOptions:   ctrlz.DefaultOptions(),
+		EnableProfiling:        true,
+		NumCheckCacheEntries:   5000 * 5 * 60, // 5000 QPS with average TTL of 5 minutes
+		LoadSheddingOptions:    loadshedding.DefaultOptions(),
 	}
 }
 
@@ -133,8 +132,8 @@ func (a *Args) validate() error {
 		return fmt.Errorf("adapter worker pool size must be >= 0 and <= 2^31-1, got pool size %d", a.AdapterWorkerPoolSize)
 	}
 
-	if a.ExpressionEvalCacheSize <= 0 {
-		return fmt.Errorf("expressiion evaluation cache size must be >= 0 and <= 2^31-1, got cache size %d", a.ExpressionEvalCacheSize)
+	if a.NumCheckCacheEntries < 0 {
+		return fmt.Errorf("# check cache entries must be >= 0 and <= 2^31-1, got %d", a.NumCheckCacheEntries)
 	}
 
 	return nil
@@ -142,23 +141,24 @@ func (a *Args) validate() error {
 
 // String produces a stringified version of the arguments for debugging.
 func (a *Args) String() string {
-	var b bytes.Buffer
+	buf := &bytes.Buffer{}
 
-	b.WriteString(fmt.Sprint("MaxMessageSize: ", a.MaxMessageSize, "\n"))
-	b.WriteString(fmt.Sprint("MaxConcurrentStreams: ", a.MaxConcurrentStreams, "\n"))
-	b.WriteString(fmt.Sprint("APIWorkerPoolSize: ", a.APIWorkerPoolSize, "\n"))
-	b.WriteString(fmt.Sprint("AdapterWorkerPoolSize: ", a.AdapterWorkerPoolSize, "\n"))
-	b.WriteString(fmt.Sprint("ExpressionEvalCacheSize: ", a.ExpressionEvalCacheSize, "\n"))
-	b.WriteString(fmt.Sprint("APIPort: ", a.APIPort, "\n"))
-	b.WriteString(fmt.Sprint("MonitoringPort: ", a.MonitoringPort, "\n"))
-	b.WriteString(fmt.Sprint("EnableProfiling: ", a.EnableProfiling, "\n"))
-	b.WriteString(fmt.Sprint("SingleThreaded: ", a.SingleThreaded, "\n"))
-	b.WriteString(fmt.Sprint("ConfigStoreURL: ", a.ConfigStoreURL, "\n"))
-	b.WriteString(fmt.Sprint("ConfigDefaultNamespace: ", a.ConfigDefaultNamespace, "\n"))
-	b.WriteString(fmt.Sprint("ConfigIdentityAttribute: ", a.ConfigIdentityAttribute, "\n"))
-	b.WriteString(fmt.Sprint("ConfigIdentityAttributeDomain: ", a.ConfigIdentityAttributeDomain, "\n"))
-	b.WriteString(fmt.Sprint("UseNewRuntime: ", a.UseNewRuntime, "\n"))
-	b.WriteString(fmt.Sprintf("LoggingOptions: %#v\n", *a.LoggingOptions))
-	b.WriteString(fmt.Sprintf("TracingOptions: %#v\n", *a.TracingOptions))
-	return b.String()
+	fmt.Fprint(buf, "MaxMessageSize: ", a.MaxMessageSize, "\n")
+	fmt.Fprint(buf, "MaxConcurrentStreams: ", a.MaxConcurrentStreams, "\n")
+	fmt.Fprint(buf, "APIWorkerPoolSize: ", a.APIWorkerPoolSize, "\n")
+	fmt.Fprint(buf, "AdapterWorkerPoolSize: ", a.AdapterWorkerPoolSize, "\n")
+	fmt.Fprint(buf, "APIPort: ", a.APIPort, "\n")
+	fmt.Fprint(buf, "APIAddress: ", a.APIAddress, "\n")
+	fmt.Fprint(buf, "MonitoringPort: ", a.MonitoringPort, "\n")
+	fmt.Fprint(buf, "EnableProfiling: ", a.EnableProfiling, "\n")
+	fmt.Fprint(buf, "SingleThreaded: ", a.SingleThreaded, "\n")
+	fmt.Fprint(buf, "NumCheckCacheEntries: ", a.NumCheckCacheEntries, "\n")
+	fmt.Fprint(buf, "ConfigStoreURL: ", a.ConfigStoreURL, "\n")
+	fmt.Fprint(buf, "ConfigDefaultNamespace: ", a.ConfigDefaultNamespace, "\n")
+	fmt.Fprintf(buf, "LoggingOptions: %#v\n", *a.LoggingOptions)
+	fmt.Fprintf(buf, "TracingOptions: %#v\n", *a.TracingOptions)
+	fmt.Fprintf(buf, "IntrospectionOptions: %#v\n", *a.IntrospectionOptions)
+	fmt.Fprintf(buf, "LoadSheddingOptions: %#v\n", a.LoadSheddingOptions)
+
+	return buf.String()
 }

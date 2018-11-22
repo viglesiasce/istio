@@ -19,14 +19,13 @@ import (
 	"io/ioutil"
 	"os"
 	"sync"
-	// TODO(nmittler): Remove this
-	_ "github.com/golang/glog"
 
 	"istio.io/istio/pkg/log"
 )
 
 var (
 	skipCleanup = flag.Bool("skip_cleanup", false, "Debug, skip clean up")
+	skipLogSave = flag.Bool("skip_log_save", false, "Debug, skip log save")
 	// TestVM is true if in this test run user wants to test VM on istio
 	TestVM = flag.Bool("test_vm", false, "whether to test VM on istio")
 )
@@ -70,7 +69,7 @@ func InitLogging() error {
 	}
 
 	// Configure Istio logging to use a file under the temp dir.
-	o := log.NewOptions()
+	o := log.DefaultOptions()
 	tmpLogFile, err := ioutil.TempFile(tmpDir, tmpPrefix)
 	if err != nil {
 		return err
@@ -97,7 +96,7 @@ func NewCommonConfigWithVersion(testID, version string) (*CommonConfig, error) {
 		return nil, err
 	}
 	cl := new(testCleanup)
-	cl.skipCleanup = *skipCleanup
+	cl.skipCleanup = os.Getenv("SKIP_CLEANUP") != "" || *skipCleanup
 
 	c := &CommonConfig{
 		Info:    t,
@@ -108,6 +107,10 @@ func NewCommonConfigWithVersion(testID, version string) (*CommonConfig, error) {
 	c.Cleanup.RegisterCleanable(c.Kube)
 	c.Cleanup.RegisterCleanable(c.Kube.Istioctl)
 	c.Cleanup.RegisterCleanable(c.Kube.AppManager)
+	if c.Kube.RemoteKubeConfig != "" {
+		c.Cleanup.RegisterCleanable(c.Kube.RemoteAppManager)
+	}
+
 	return c, nil
 }
 
@@ -192,12 +195,15 @@ func (c *CommonConfig) saveLogs(r int) error {
 		log.Warn("Skipping log saving as Info is not initialized")
 		return nil
 	}
+	if *skipLogSave {
+		return nil
+	}
 	log.Info("Saving logs")
 	if err := c.Info.Update(r); err != nil {
 		log.Errorf("Could not create status file. Error %s", err)
 		return err
 	}
-	return c.Info.FetchAndSaveClusterLogs(c.Kube.Namespace)
+	return c.Info.FetchAndSaveClusterLogs(c.Kube.Namespace, c.Kube.KubeConfig)
 }
 
 // RunTest sets up all registered cleanables in FIFO order

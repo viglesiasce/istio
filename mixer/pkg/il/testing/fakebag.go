@@ -67,8 +67,14 @@ func (b *FakeBag) Names() []string {
 // Done indicates the bag can be reclaimed.
 func (b *FakeBag) Done() {}
 
-// DebugString is needed to implement the Bag interface.
-func (b *FakeBag) DebugString() string { return "" }
+// Contains returns true if the key is present in the bag.
+func (b *FakeBag) Contains(key string) bool {
+	_, found := b.Attrs[key]
+	return found
+}
+
+// String is needed to implement the Bag interface.
+func (b *FakeBag) String() string { return "" }
 
 // ReferencedList returns the sorted list of attributes that were referenced. Attribute references through
 // string maps are encoded as mapname[keyname].

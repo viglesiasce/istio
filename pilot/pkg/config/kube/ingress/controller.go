@@ -20,8 +20,7 @@ import (
 	"errors"
 	"reflect"
 	"time"
-	// TODO(nmittler): Remove this
-	_ "github.com/golang/glog"
+
 	"k8s.io/api/extensions/v1beta1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -113,11 +112,20 @@ func (c *controller) RegisterEventHandler(typ string, f func(model.Config, model
 			return nil
 		}
 
+		// In 1.0, Pilot has a single function, clearCache, which ignores
+		// the inputs.
+		// In future we may do smarter processing - but first we'll do
+		// major refactoring. No need to recompute everything and generate
+		// multiple events.
+
 		// TODO: This works well for Add and Delete events, but not so for Update:
 		// An updated ingress may also trigger an Add or Delete for one of its constituent sub-rules.
-		rules := convertIngress(*ingress, c.domainSuffix)
-		for _, rule := range rules {
-			f(rule, event)
+		switch typ {
+		case model.Gateway.Type:
+			//config, _ := ConvertIngressV1alpha3(*ingress, c.domainSuffix)
+			//f(config, event)
+		case model.VirtualService.Type:
+			f(model.Config{}, event)
 		}
 
 		return nil
@@ -135,11 +143,13 @@ func (c *controller) Run(stop <-chan struct{}) {
 }
 
 func (c *controller) ConfigDescriptor() model.ConfigDescriptor {
-	return model.ConfigDescriptor{model.IngressRule}
+	//TODO: are these two config descriptors right?
+	return model.ConfigDescriptor{model.Gateway, model.VirtualService}
 }
 
+//TODO: we don't return out of this function now
 func (c *controller) Get(typ, name, namespace string) (*model.Config, bool) {
-	if typ != model.IngressRule.Type {
+	if typ != model.Gateway.Type && typ != model.VirtualService.Type {
 		return nil, false
 	}
 
@@ -159,21 +169,18 @@ func (c *controller) Get(typ, name, namespace string) (*model.Config, bool) {
 		return nil, false
 	}
 
-	rules := convertIngress(*ingress, c.domainSuffix)
-	for _, rule := range rules {
-		if rule.Name == name {
-			return &rule, true
-		}
-	}
 	return nil, false
 }
 
 func (c *controller) List(typ, namespace string) ([]model.Config, error) {
-	if typ != model.IngressRule.Type {
+	if typ != model.Gateway.Type && typ != model.VirtualService.Type {
 		return nil, errUnsupportedOp
 	}
 
 	out := make([]model.Config, 0)
+
+	ingressByHost := map[string]*model.Config{}
+
 	for _, obj := range c.informer.GetStore().List() {
 		ingress := obj.(*v1beta1.Ingress)
 		if namespace != "" && namespace != ingress.Namespace {
@@ -184,8 +191,19 @@ func (c *controller) List(typ, namespace string) ([]model.Config, error) {
 			continue
 		}
 
-		rules := convertIngress(*ingress, c.domainSuffix)
-		out = append(out, rules...)
+		switch typ {
+		case model.VirtualService.Type:
+			ConvertIngressVirtualService(*ingress, c.domainSuffix, ingressByHost)
+		case model.Gateway.Type:
+			gateways := ConvertIngressV1alpha3(*ingress, c.domainSuffix)
+			out = append(out, gateways)
+		}
+	}
+
+	if typ == model.VirtualService.Type {
+		for _, obj := range ingressByHost {
+			out = append(out, *obj)
+		}
 	}
 
 	return out, nil

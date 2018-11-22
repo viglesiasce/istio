@@ -18,7 +18,8 @@ import (
 	"context"
 	"testing"
 
-	rpc "istio.io/gogo-genproto/googleapis/google/rpc"
+	rpc "github.com/gogo/googleapis/google/rpc"
+
 	"istio.io/istio/mixer/pkg/adapter"
 	"istio.io/istio/mixer/pkg/adapter/test"
 	"istio.io/istio/mixer/template/authorization"
@@ -28,7 +29,7 @@ type fakedAllowRBACStore struct {
 	called int
 }
 
-func (f *fakedAllowRBACStore) CheckPermission(inst *authorization.Instance, env adapter.Env) (bool, error) {
+func (f *fakedAllowRBACStore) CheckPermission(inst *authorization.Instance, logger adapter.Logger) (bool, error) {
 	f.called++
 	return true, nil
 }
@@ -37,7 +38,7 @@ type fakedDenyRBACStore struct {
 	called int
 }
 
-func (f *fakedDenyRBACStore) CheckPermission(inst *authorization.Instance, env adapter.Env) (bool, error) {
+func (f *fakedDenyRBACStore) CheckPermission(inst *authorization.Instance, logger adapter.Logger) (bool, error) {
 	f.called++
 	return false, nil
 }

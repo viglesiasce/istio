@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package disableCheckCache
+package client_test
 
 import (
 	"fmt"
@@ -35,10 +35,10 @@ var expectedStats = map[string]int{
 
 func TestDisableCheckCache(t *testing.T) {
 	s := env.NewTestSetup(env.DisableCheckCacheTest, t)
-	env.SetStatsUpdateInterval(s.V2(), 1)
+	env.SetStatsUpdateInterval(s.MfConfig(), 1)
 
 	// Disable check cache.
-	env.DisableHTTPClientCache(s.V2().HTTPServerConf, true, false, false)
+	env.DisableHTTPClientCache(s.MfConfig().HTTPServerConf, true, false, false)
 
 	if err := s.SetUp(); err != nil {
 		t.Fatalf("Failed to setup test: %v", err)
@@ -58,9 +58,5 @@ func TestDisableCheckCache(t *testing.T) {
 	s.VerifyCheckCount(tag, 10)
 
 	// Check stats for Check, Quota and report calls.
-	if respStats, err := s.WaitForStatsUpdateAndGetStats(2); err == nil {
-		s.VerifyStats(respStats, expectedStats)
-	} else {
-		t.Errorf("Failed to get stats from Envoy %v", err)
-	}
+	s.VerifyStats(expectedStats)
 }

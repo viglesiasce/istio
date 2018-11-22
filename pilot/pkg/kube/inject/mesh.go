@@ -15,82 +15,126 @@
 package inject
 
 const (
-	parameterizedTemplateDelimBegin = "[["
-	parameterizedTemplateDelimEnd   = "]]"
-	parameterizedTemplate           = `
+	sidecarTemplateDelimBegin = "[["
+	sidecarTemplateDelimEnd   = "]]"
+
+	// nolint: lll
+	parameterizedTemplate = `
+[[- $proxyImageKey                  := "sidecar.istio.io/proxyImage" -]]
+[[- $interceptionModeKey            := "sidecar.istio.io/interceptionMode" -]]
+[[- $statusPortKey                  := "status.sidecar.istio.io/port" -]]
+[[- $readinessInitialDelayKey       := "readiness.status.sidecar.istio.io/initialDelaySeconds" -]]
+[[- $readinessPeriodKey             := "readiness.status.sidecar.istio.io/periodSeconds" -]]
+[[- $readinessFailureThresholdKey   := "readiness.status.sidecar.istio.io/failureThreshold" -]]
+[[- $readinessApplicationPortsKey   := "readiness.status.sidecar.istio.io/applicationPorts" -]]
+[[- $includeOutboundIPRangesKey     := "traffic.sidecar.istio.io/includeOutboundIPRanges" -]]
+[[- $excludeOutboundIPRangesKey     := "traffic.sidecar.istio.io/excludeOutboundIPRanges" -]]
+[[- $includeInboundPortsKey         := "traffic.sidecar.istio.io/includeInboundPorts" -]]
+[[- $excludeInboundPortsKey         := "traffic.sidecar.istio.io/excludeInboundPorts" -]]
+[[- $statusPortValue                := (annotation .ObjectMeta $statusPortKey {{ .StatusPort }}) -]]
+[[- $readinessInitialDelayValue     := (annotation .ObjectMeta $readinessInitialDelayKey "{{ .ReadinessInitialDelaySeconds }}") -]]
+[[- $readinessPeriodValue           := (annotation .ObjectMeta $readinessPeriodKey "{{ .ReadinessPeriodSeconds }}") ]]
+[[- $readinessFailureThresholdValue := (annotation .ObjectMeta $readinessFailureThresholdKey {{ .ReadinessFailureThreshold }}) -]]
+[[- $readinessApplicationPortsValue := (annotation .ObjectMeta $readinessApplicationPortsKey (applicationPorts .Spec.Containers)) -]]
 initContainers:
 - name: istio-init
-  image: [[ .InitImage ]]
+  image: {{ .InitImage }}
   args:
   - "-p"
-  - {{ .MeshConfig.ProxyListenPort }}
+  - [[ .MeshConfig.ProxyListenPort ]]
   - "-u"
-  - [[ .SidecarProxyUID ]]
-  [[ if ne .IncludeIPRanges "" -]]
+  - {{ .SidecarProxyUID }}
+  - "-m"
+  - [[ annotation .ObjectMeta $interceptionModeKey .ProxyConfig.InterceptionMode ]]
   - "-i"
-  - [[ .IncludeIPRanges ]]
-  [[ end -]]
-  [[ if eq .ImagePullPolicy "" -]]
+  - "[[ annotation .ObjectMeta $includeOutboundIPRangesKey "{{ .IncludeIPRanges }}" ]]"
+  - "-x"
+  - "[[ annotation .ObjectMeta $excludeOutboundIPRangesKey "{{ .ExcludeIPRanges }}" ]]"
+  - "-b"
+  - "[[ annotation .ObjectMeta $includeInboundPortsKey (includeInboundPorts .Spec.Containers) ]]"
+  - "-d"
+  - "[[ excludeInboundPort $statusPortValue (annotation .ObjectMeta $excludeInboundPortsKey "{{ .ExcludeInboundPorts }}") ]]"
+  {{ if eq .ImagePullPolicy "" -}}
   imagePullPolicy: IfNotPresent
-  [[ else -]]
-  imagePullPolicy: [[ .ImagePullPolicy ]]
-  [[ end -]]
+  {{ else -}}
+  imagePullPolicy: {{ .ImagePullPolicy }}
+  {{ end -}}
   securityContext:
     capabilities:
       add:
       - NET_ADMIN
-    [[ if eq .DebugMode true -]]
+    {{ if (or (eq .DebugMode true) (eq .Privileged true)) -}}
     privileged: true
-    [[ end -]]
+    {{ end -}}
   restartPolicy: Always
-[[ if eq .EnableCoreDump true -]]
-- args:
+{{ if eq .EnableCoreDump true -}}
+- name: enable-core-dump
+  args:
   - -c
-  - sysctl -w kernel.core_pattern=/etc/istio/proxy/core.%e.%p.%t && ulimit -c
-    unlimited
+  - sysctl -w kernel.core_pattern=/var/lib/istio/core.proxy && ulimit -c unlimited
   command:
   - /bin/sh
-  image: alpine
+  image: {{ .InitImage }}
   imagePullPolicy: IfNotPresent
-  name: enable-core-dump
   resources: {}
   securityContext:
     privileged: true
-[[ end -]]
+{{ end -}}
 containers:
 - name: istio-proxy
-  image: [[ .ProxyImage ]]
+  image: [[ annotation .ObjectMeta $proxyImageKey "{{ .ProxyImage }}" ]] 
   args:
   - proxy
   - sidecar
   - --configPath
-  - {{ .ProxyConfig.ConfigPath }}
+  - [[ .ProxyConfig.ConfigPath ]]
   - --binaryPath
-  - {{ .ProxyConfig.BinaryPath }}
+  - [[ .ProxyConfig.BinaryPath ]]
   - --serviceCluster
-  {{ if ne "" (index .ObjectMeta.Labels "app") -}}
-  - {{ index .ObjectMeta.Labels "app" }}
-  {{ else -}}
+  [[ if ne "" (index .ObjectMeta.Labels "app") -]]
+  - [[ index .ObjectMeta.Labels "app" ]]
+  [[ else -]]
   - "istio-proxy"
-  {{ end -}}
+  [[ end -]]
   - --drainDuration
-  - {{ formatDuration .ProxyConfig.DrainDuration }}
+  - [[ formatDuration .ProxyConfig.DrainDuration ]]
   - --parentShutdownDuration
-  - {{ formatDuration .ProxyConfig.ParentShutdownDuration }}
+  - [[ formatDuration .ProxyConfig.ParentShutdownDuration ]]
   - --discoveryAddress
-  - {{ .ProxyConfig.DiscoveryAddress }}
+  - [[ .ProxyConfig.DiscoveryAddress ]]
   - --discoveryRefreshDelay
-  - {{ formatDuration .ProxyConfig.DiscoveryRefreshDelay }}
+  - [[ formatDuration .ProxyConfig.DiscoveryRefreshDelay ]]
   - --zipkinAddress
-  - {{ .ProxyConfig.ZipkinAddress }}
+  - [[ .ProxyConfig.ZipkinAddress ]]
   - --connectTimeout
-  - {{ formatDuration .ProxyConfig.ConnectTimeout }}
+  - [[ formatDuration .ProxyConfig.ConnectTimeout ]]
   - --statsdUdpAddress
-  - {{ .ProxyConfig.StatsdUdpAddress }}
+  - [[ .ProxyConfig.StatsdUdpAddress ]]
   - --proxyAdminPort
-  - {{ .ProxyConfig.ProxyAdminPort }}
+  - [[ .ProxyConfig.ProxyAdminPort ]]
+  [[ if gt .ProxyConfig.Concurrency 0 -]]
+  - --concurrency
+  - [[ .ProxyConfig.Concurrency ]]
+  [[ end -]]
   - --controlPlaneAuthPolicy
-  - {{ .ProxyConfig.ControlPlaneAuthPolicy }}
+  - [[ .ProxyConfig.ControlPlaneAuthPolicy ]]
+  - --statusPort
+  - [[ $statusPortValue ]]
+  - --applicationPorts
+  - "[[ $readinessApplicationPortsValue ]]"
+  [[ if (ne $statusPortValue "0") ]]
+  readinessProbe:
+    httpGet:
+      path: /healthz/ready
+      port: [[ $statusPortValue ]]
+    initialDelaySeconds: [[ $readinessInitialDelayValue ]]
+    periodSeconds: [[ $readinessPeriodValue ]]
+    failureThreshold: [[ $readinessFailureThresholdValue ]]
+  [[ end -]]
+  ports:
+  - containerPort: 15090
+    protocol: TCP
+    name: http-envoy-prom
   env:
   - name: POD_NAME
     valueFrom:
@@ -104,20 +148,37 @@ containers:
     valueFrom:
       fieldRef:
         fieldPath: status.podIP
-  [[ if eq .ImagePullPolicy "" -]]
+  - name: ISTIO_META_POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+  - name: ISTIO_META_INTERCEPTION_MODE
+    value: [[ annotation .ObjectMeta $interceptionModeKey .ProxyConfig.InterceptionMode ]]
+  {{ if eq .ImagePullPolicy "" -}}
   imagePullPolicy: IfNotPresent
-  [[ else -]]
-  imagePullPolicy: [[ .ImagePullPolicy ]]
-  [[ end -]]
+  {{ else -}}
+  imagePullPolicy: {{ .ImagePullPolicy }}
+  {{ end -}}
+  resources:
+    requests:
+      cpu: 10m
   securityContext:
-      [[ if eq .DebugMode true -]]
-      privileged: true
-      readOnlyRootFilesystem: false
-      [[ else -]]
-      privileged: false
-      readOnlyRootFilesystem: true
-      [[ end -]]
-      runAsUser: 1337
+    {{ if (or (eq .DebugMode true) (eq .Privileged true)) -}}
+    privileged: true
+    {{ end -}}
+    {{ if eq .DebugMode true -}}
+    readOnlyRootFilesystem: false
+    {{ else }}
+    readOnlyRootFilesystem: true
+    [[ if eq (annotation .ObjectMeta $interceptionModeKey .ProxyConfig.InterceptionMode) "TPROXY" -]]
+    capabilities:
+      add:
+      - NET_ADMIN
+    [[ end -]]
+    {{ end -}}
+    [[ if ne (annotation .ObjectMeta $interceptionModeKey .ProxyConfig.InterceptionMode) "TPROXY" -]]
+    runAsUser: 1337
+    [[ end -]]
   restartPolicy: Always
   volumeMounts:
   - mountPath: /etc/istio/proxy
@@ -132,10 +193,10 @@ volumes:
 - name: istio-certs
   secret:
     optional: true
-    {{ if eq .Spec.ServiceAccountName "" -}}
+    [[ if eq .Spec.ServiceAccountName "" -]]
     secretName: istio.default
-    {{ else -}}
-    secretName: {{ printf "istio.%s" .Spec.ServiceAccountName }}
-    {{ end -}}
+    [[ else -]]
+    secretName: [[ printf "istio.%s" .Spec.ServiceAccountName ]]
+    [[ end -]]
 `
 )

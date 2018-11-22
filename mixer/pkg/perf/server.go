@@ -80,32 +80,33 @@ func initializeArgs(settings *Settings, setup *Setup) (*testEnv.Args, error) {
 		}
 	}
 
-	var args = testEnv.NewArgs()
+	var args = testEnv.DefaultArgs()
 	args.APIPort = 0
 	args.MonitoringPort = 0
 	args.Templates = templates
 	args.Adapters = adapters
 	args.ConfigStoreURL = `fs://` + serverDir
 	args.ConfigDefaultNamespace = "istio-system"
-	args.ConfigIdentityAttribute = setup.Config.IdentityAttribute
-	args.ConfigIdentityAttributeDomain = setup.Config.IdentityAttributeDomain
 	args.SingleThreaded = setup.Config.SingleThreaded
-	args.UseNewRuntime = setup.Config.UseRuntime2
 
 	if setup.Config.EnableDebugLog {
 		// Override enableLog. This should skip the next if conditional
 		setup.Config.EnableLog = true
 
-		o := log.NewOptions()
-		_ = o.SetOutputLevel(log.DebugLevel)
+		o := log.DefaultOptions()
+		o.SetOutputLevel(log.DefaultScopeName, log.DebugLevel)
+		o.SetOutputLevel("adapters", log.DebugLevel)
 		args.LoggingOptions = o
 	}
 
 	if !setup.Config.EnableLog {
-		o := log.NewOptions()
-		_ = o.SetOutputLevel(log.NoneLevel)
+		o := log.DefaultOptions()
+		o.SetOutputLevel(log.DefaultScopeName, log.NoneLevel)
+		o.SetOutputLevel("adapters", log.NoneLevel)
 		args.LoggingOptions = o
 	}
+
+	args.LoggingOptions.LogGrpc = false // prevent race in grpclog.SetLogger
 
 	return args, nil
 }

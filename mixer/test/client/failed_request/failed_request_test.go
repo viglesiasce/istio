@@ -12,13 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package failedRequest
+package client_test
 
 import (
 	"fmt"
 	"testing"
 
-	rpc "istio.io/gogo-genproto/googleapis/google/rpc"
+	rpc "github.com/gogo/googleapis/google/rpc"
+
 	"istio.io/istio/mixer/test/client/env"
 )
 
@@ -41,13 +42,12 @@ const checkAttributesMixerFail = `
   "request.scheme": "http",
   "source.uid": "POD11",
   "source.namespace": "XYZ11",
-  "source.ip": "[127 0 0 1]",
-  "source.port": "*",
   "target.name": "target-name",
   "target.user": "target-user",
   "target.uid": "POD222",
   "target.namespace": "XYZ222",
   "connection.mtls": false,
+  "origin.ip": "[127 0 0 1]",
   "request.headers": {
      ":method": "GET",
      ":path": "/echo",
@@ -76,13 +76,14 @@ const reportAttributesMixerFail = `
   "request.scheme": "http",
   "source.uid": "POD11",
   "source.namespace": "XYZ11",
-  "source.ip": "[127 0 0 1]",
-  "source.port": "*",
   "target.name": "target-name",
   "target.user": "target-user",
   "target.uid": "POD222",
   "target.namespace": "XYZ222",
   "connection.mtls": false,
+  "origin.ip": "[127 0 0 1]",
+  "check.cache_hit": false,
+  "quota.cache_hit": false,
   "request.headers": {
      ":method": "GET",
      ":path": "/echo",
@@ -102,7 +103,9 @@ const reportAttributesMixerFail = `
      "content-length": "41",
      ":status": "401",
      "server": "envoy"
-  }
+  },
+  "response.total_size": "*",
+  "request.total_size": 306
 }
 `
 
@@ -121,13 +124,16 @@ const reportAttributesBackendFail = `
   "request.scheme": "http",
   "source.uid": "POD11",
   "source.namespace": "XYZ11",
-  "source.ip": "[127 0 0 1]",
-  "source.port": "*",
+  "destination.ip": "[127 0 0 1]",
+  "destination.port": "*",
   "target.name": "target-name",
   "target.user": "target-user",
   "target.uid": "POD222",
   "target.namespace": "XYZ222",
   "connection.mtls": false,
+  "origin.ip": "[127 0 0 1]",
+  "check.cache_hit": false,
+  "quota.cache_hit": false,
   "request.headers": {
      ":method": "GET",
      ":path": "/echo",
@@ -146,7 +152,9 @@ const reportAttributesBackendFail = `
      "content-length": "25",
      ":status": "400",
      "server": "envoy"
-  }
+  },
+  "response.total_size": "*",
+  "request.total_size": 329
 }
 `
 

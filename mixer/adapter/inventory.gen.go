@@ -17,7 +17,9 @@
 package adapter
 
 import (
+	bypass "istio.io/istio/mixer/adapter/bypass"
 	circonus "istio.io/istio/mixer/adapter/circonus"
+	cloudwatch "istio.io/istio/mixer/adapter/cloudwatch"
 	denier "istio.io/istio/mixer/adapter/denier"
 	dogstatsd "istio.io/istio/mixer/adapter/dogstatsd"
 	fluentd "istio.io/istio/mixer/adapter/fluentd"
@@ -28,7 +30,9 @@ import (
 	opa "istio.io/istio/mixer/adapter/opa"
 	prometheus "istio.io/istio/mixer/adapter/prometheus"
 	rbac "istio.io/istio/mixer/adapter/rbac"
+	redisquota "istio.io/istio/mixer/adapter/redisquota"
 	servicecontrol "istio.io/istio/mixer/adapter/servicecontrol"
+	signalfx "istio.io/istio/mixer/adapter/signalfx"
 	solarwinds "istio.io/istio/mixer/adapter/solarwinds"
 	stackdriver "istio.io/istio/mixer/adapter/stackdriver"
 	statsd "istio.io/istio/mixer/adapter/statsd"
@@ -39,7 +43,9 @@ import (
 // Inventory returns the inventory of all available adapters.
 func Inventory() []adptr.InfoFn {
 	return []adptr.InfoFn{
+		bypass.GetInfo,
 		circonus.GetInfo,
+		cloudwatch.GetInfo,
 		denier.GetInfo,
 		dogstatsd.GetInfo,
 		fluentd.GetInfo,
@@ -50,7 +56,9 @@ func Inventory() []adptr.InfoFn {
 		opa.GetInfo,
 		prometheus.GetInfo,
 		rbac.GetInfo,
+		redisquota.GetInfo,
 		servicecontrol.GetInfo,
+		signalfx.GetInfo,
 		solarwinds.GetInfo,
 		stackdriver.GetInfo,
 		statsd.GetInfo,

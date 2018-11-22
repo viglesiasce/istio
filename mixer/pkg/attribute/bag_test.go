@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"reflect"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -114,19 +113,27 @@ func TestBag(t *testing.T) {
 	if !found || r.(string) != "42" {
 		t.Error("N2 has wrong value")
 	}
+
+	_ = child.String()
+	child.Done()
 }
 
 func TestMerge(t *testing.T) {
 	mb := GetMutableBag(empty)
+	mb.Set("STRING0", "@")
 
 	c1 := GetMutableBag(mb)
 	c2 := GetMutableBag(mb)
 
+	c1.Set("STRING0", "Z")
 	c1.Set("STRING1", "A")
 	c2.Set("STRING2", "B")
 
-	if err := mb.Merge(c1, nil, c2); err != nil {
-		t.Errorf("Got %v, expecting success", err)
+	mb.Merge(c1)
+	mb.Merge(c2)
+
+	if v, ok := mb.Get("STRING0"); !ok || v.(string) != "@" {
+		t.Errorf("Got %v, expected @", v)
 	}
 
 	if v, ok := mb.Get("STRING1"); !ok || v.(string) != "A" {
@@ -135,37 +142,6 @@ func TestMerge(t *testing.T) {
 
 	if v, ok := mb.Get("STRING2"); !ok || v.(string) != "B" {
 		t.Errorf("Got %v, expected B", v)
-	}
-}
-
-func TestMergeErrors(t *testing.T) {
-	mb := GetMutableBag(empty)
-
-	c1 := GetMutableBag(mb)
-	c2 := GetMutableBag(mb)
-
-	c1.Set("FOO", "X")
-	c2.Set("FOO", "Y")
-
-	if err := mb.Merge(c1, c2); err == nil {
-		t.Error("Got success, expected failure")
-	} else if !strings.Contains(err.Error(), "FOO") {
-		t.Errorf("Expected error to contain the word FOO, got %s", err.Error())
-	}
-}
-func TestPreserveMerge(t *testing.T) {
-	mb := GetMutableBag(empty)
-
-	c1 := GetMutableBag(mb)
-	c2 := GetMutableBag(mb)
-
-	c1.Set("FOO", "X")
-	c2.Set("FOO", "Y")
-
-	if err := mb.PreserveMerge(c1, c2); err != nil {
-		t.Errorf("Got unexpected error: %v", err)
-	} else if val, _ := mb.Get("FOO"); val != "X" {
-		t.Errorf("Bad attribute value for FOO: got '%s', want '%s' ", val, "X")
 	}
 }
 
@@ -178,6 +154,10 @@ func TestEmpty(t *testing.T) {
 
 	if _, ok := b.Get("XYZ"); ok {
 		t.Errorf("Got true, expected false")
+	}
+
+	if s := b.String(); s != "" {
+		t.Errorf("Got '%s', expecting an empty string", s)
 	}
 
 	b.Done()
@@ -194,8 +174,13 @@ func TestEmptyRoundTrip(t *testing.T) {
 	}
 }
 
-func TestProtoBag(t *testing.T) {
-	globalWordList := []string{"G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9"}
+func mutableBagFromProtoForTesing() *MutableBag {
+	b := NewProtoBag(protoAttrsForTesting())
+	return GetMutableBag(b)
+}
+
+func protoAttrsForTesting() (*mixerpb.CompressedAttributes, map[string]int32, []string) {
+	globalWordList := []string{"G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9", "BADKEY"}
 	messageWordList := []string{"M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10"}
 
 	globalDict := make(map[string]int32)
@@ -207,7 +192,7 @@ func TestProtoBag(t *testing.T) {
 
 	attrs := mixerpb.CompressedAttributes{
 		Words:      messageWordList,
-		Strings:    map[int32]int32{4: 5},
+		Strings:    map[int32]int32{4: 5, 3: 2, 2: 6, 5: 4},
 		Int64S:     map[int32]int64{6: 42},
 		Doubles:    map[int32]float64{7: 42.0},
 		Bools:      map[int32]bool{-1: true},
@@ -216,6 +201,13 @@ func TestProtoBag(t *testing.T) {
 		Bytes:      map[int32][]uint8{-4: {11}},
 		StringMaps: map[int32]mixerpb.StringMap{-5: sm},
 	}
+
+	return &attrs, globalDict, globalWordList
+}
+
+func TestProtoBag(t *testing.T) {
+
+	attrs, globalDict, globalWordList := protoAttrsForTesting()
 
 	cases := []struct {
 		name  string
@@ -237,12 +229,12 @@ func TestProtoBag(t *testing.T) {
 			var err error
 
 			if j == 0 {
-				pb, err = GetBagFromProto(&attrs, globalWordList)
+				pb, err = GetBagFromProto(attrs, globalWordList)
 				if err != nil {
 					t.Fatalf("GetBagFromProto failed with %v", err)
 				}
 			} else {
-				b := NewProtoBag(&attrs, globalDict, globalWordList)
+				b := NewProtoBag(attrs, globalDict, globalWordList)
 				pb = GetMutableBag(b)
 			}
 
@@ -264,6 +256,9 @@ func TestProtoBag(t *testing.T) {
 			for _, cs := range cases {
 				found := false
 				for _, n := range names {
+					if !pb.Contains(n) {
+						t.Errorf("expected bag to contain %s", n)
+					}
 					if cs.name == n {
 						found = true
 						break
@@ -285,9 +280,23 @@ func TestProtoBag(t *testing.T) {
 			var a2 mixerpb.CompressedAttributes
 			mb.ToProto(&a2, globalDict, len(globalDict))
 
+			_ = pb.String()
 			pb.Done()
 		}
 	}
+}
+
+func TestProtoBag_Contains(t *testing.T) {
+	mb := mutableBagFromProtoForTesing()
+
+	if mb.Contains("THIS_KEY_IS_NOT_IN_DICT") {
+		t.Errorf("Found unexpected key")
+	}
+
+	if mb.Contains("BADKEY") {
+		t.Errorf("Found unexpected key")
+	}
+
 }
 
 func TestMessageDict(t *testing.T) {
@@ -415,6 +424,14 @@ func TestProtoBag_Errors(t *testing.T) {
 
 	if pb != nil {
 		t.Error("GetBagFromProto returned valid bag, expected nil")
+	}
+}
+
+func TestNil(t *testing.T) {
+	var mb *MutableBag
+	a := mb.Names()
+	if len(a) != 0 {
+		t.Errorf("Got %v, expected 0", len(a))
 	}
 }
 
@@ -550,6 +567,8 @@ func TestBogusProto(t *testing.T) {
 			}
 		})
 	}
+
+	b.Done()
 }
 
 func TestMessageDictEdge(t *testing.T) {
@@ -576,6 +595,8 @@ func TestMessageDictEdge(t *testing.T) {
 	if s != "N2" {
 		t.Errorf("Expecting to get N2, got %s", s)
 	}
+
+	b.Done()
 }
 
 func TestDoubleStrings(t *testing.T) {
@@ -614,13 +635,15 @@ func TestDoubleStrings(t *testing.T) {
 			} else if s != "GOOD" {
 				t.Errorf("Got %s, expecting GOOD", s)
 			}
+
+			b.Done()
 		})
 	}
 }
 
 func TestReferenceTracking(t *testing.T) {
-	globalWordList := []string{"G0", "G1", "G2"}
-	globalDict := map[string]int32{globalWordList[0]: 0, globalWordList[1]: 1, globalWordList[2]: 2}
+	globalWordList := []string{"G0", "G1", "G2", "G3"}
+	globalDict := map[string]int32{globalWordList[0]: 0, globalWordList[1]: 1, globalWordList[2]: 2, globalWordList[3]: 3}
 	messageWordList := []string{"N1", "N2", "N3"}
 
 	attrs := mixerpb.CompressedAttributes{
@@ -631,32 +654,43 @@ func TestReferenceTracking(t *testing.T) {
 			-1: 0, // "N1":"G0"
 			-2: 0, // "N2":"G0"
 		},
+		StringMaps: map[int32]mixerpb.StringMap{
+			2: {Entries: map[int32]int32{3: 0}},
+		},
 	}
 
 	cases := []struct {
-		name string
-		cond mixerpb.ReferencedAttributes_Condition
+		name   string
+		cond   mixerpb.ReferencedAttributes_Condition
+		mapKey string
 	}{
-		{"G0", mixerpb.EXACT},
-		{"N1", mixerpb.EXACT},
-		{"XX", mixerpb.ABSENCE},
-		{"DUD", -1}, // not referenced, so shouldn't be a match
+		{"G0", mixerpb.EXACT, ""},
+		{"N1", mixerpb.EXACT, ""},
+		{"XX", mixerpb.ABSENCE, ""},
+		{"G2", mixerpb.EXACT, "G3"},
+		{"G2", mixerpb.ABSENCE, "YY"},
+		{"DUD", -1, ""}, // not referenced, so shouldn't be a match
 	}
 
 	b := NewProtoBag(&attrs, globalDict, globalWordList)
 
 	// reference some attributes
-	_, _ = b.Get("G0") // from global word list
-	_, _ = b.Get("N1") // from message word list
-	_, _ = b.Get("XX") // not present
+	_, _ = b.Get("G0")  // from global word list
+	_, _ = b.Get("N1")  // from message word list
+	_, _ = b.Get("XX")  // not present
+	x, _ := b.Get("G2") // the string map
+
+	sm := x.(StringMap)
+	_, _ = sm.Get("G3") // present
+	_, _ = sm.Get("YY") // not present
 
 	ra := b.GetReferencedAttributes(globalDict, len(globalDict))
-	if len(ra.AttributeMatches) != 3 {
-		t.Errorf("Got %d matches, expected 3", len(ra.AttributeMatches))
+	if len(ra.AttributeMatches) != 5 {
+		t.Errorf("Got %d matches, expected 5", len(ra.AttributeMatches))
 	}
 
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
+		t.Run(c.name+"-"+c.mapKey, func(t *testing.T) {
 			found := false
 			for _, am := range ra.AttributeMatches {
 				var name string
@@ -667,9 +701,19 @@ func TestReferenceTracking(t *testing.T) {
 					name = ra.Words[indexToSlot(index)]
 				}
 
-				if name == c.name {
+				var mapKey string
+				index = am.MapKey
+				if index >= 0 {
+					if index != 0 || c.mapKey != "" {
+						mapKey = globalWordList[index]
+					}
+				} else {
+					mapKey = ra.Words[indexToSlot(index)]
+				}
+
+				if name == c.name && mapKey == c.mapKey {
 					if c.cond != am.Condition {
-						t.Errorf("Got condition %d, expected %d", am.Condition, c.cond)
+						t.Errorf("Got condition %d for mapkey %s, expected %d", am.Condition, mapKey, c.cond)
 					}
 					found = true
 					break
@@ -686,12 +730,23 @@ func TestReferenceTracking(t *testing.T) {
 		})
 	}
 
+	snap := b.SnapshotReferencedAttributes()
+
 	b.ClearReferencedAttributes()
 
 	ra = b.GetReferencedAttributes(globalDict, len(globalDict))
 	if len(ra.AttributeMatches) != 0 {
 		t.Errorf("Expecting no attributes matches, got %d", len(ra.AttributeMatches))
 	}
+
+	b.RestoreReferencedAttributes(snap)
+
+	ra = b.GetReferencedAttributes(globalDict, len(globalDict))
+	if len(ra.AttributeMatches) != 5 {
+		t.Errorf("Expecting 5 attributes matches, got %d", len(ra.AttributeMatches))
+	}
+
+	b.Done()
 }
 
 func TestGlobalWordCount(t *testing.T) {
@@ -738,9 +793,131 @@ func TestGlobalWordCount(t *testing.T) {
 	}
 }
 
+func TestMutableBagForTesting(t *testing.T) {
+	m := map[string]interface{}{
+		"A": 1,
+		"B": 2,
+	}
+
+	mb := GetMutableBagForTesting(m)
+	if v, found := mb.Get("A"); !found {
+		t.Errorf("Didn't find A")
+	} else if v.(int) != 1 {
+		t.Errorf("Got %d, expecting 1", v.(int))
+	}
+}
+
+func TestToProtoForTesting(t *testing.T) {
+	m := map[string]interface{}{
+		"A": 1.0,
+		"B": 2.0,
+	}
+
+	ca := GetProtoForTesting(m)
+	b, err := GetBagFromProto(ca, nil)
+	if err != nil {
+		t.Errorf("Expecting success, got %v", err)
+	}
+
+	if v, found := b.Get("A"); !found {
+		t.Errorf("Didn't find A")
+	} else if v.(float64) != 1.0 {
+		t.Errorf("Got %d, expecting 1", v.(int))
+	}
+}
+
+func TestGlobalList(t *testing.T) {
+	l := GlobalList()
+
+	// check that there's a known string in there...
+	for _, s := range l {
+		if s == "destination.service" {
+			return
+		}
+	}
+
+	t.Error("Did not find destination.service")
+}
+
+func TestReset(t *testing.T) {
+	mb := GetMutableBag(nil)
+	defer mb.Done()
+
+	mb.Set("some", "value")
+	mb.Reset()
+
+	if len(mb.Names()) != 0 {
+		t.Errorf("Got %v, expected %v", mb.Names(), []string{})
+	}
+}
+
+func TestDelete(t *testing.T) {
+	parent := GetMutableBag(nil)
+	defer parent.Done()
+	child := GetMutableBag(parent)
+	defer child.Done()
+
+	parent.Set("parent", true)
+	child.Set("parent", false)
+
+	if len(child.Names()) != 1 {
+		t.Errorf("Got %v, expected %v", len(child.Names()), 1)
+	}
+
+	v, found := child.Get("parent")
+	if !found {
+		t.Error("Failed to retrieve attribute")
+	}
+	isParent, isBool := v.(bool)
+	if !isBool || isParent {
+		t.Error("Failed to retrieve bool attribute from child")
+	}
+
+	child.Delete("parent")
+
+	v, found = child.Get("parent")
+	if !found {
+		t.Error("Failed to retrieve attribute after Delete")
+	}
+	isParent, isBool = v.(bool)
+	if !isBool || !isParent {
+		t.Error("Failed to retrieve bool attribute from parent after Delete")
+	}
+}
+
+func TestParentRoundTrip(t *testing.T) {
+	parent := GetMutableBag(nil)
+	child := GetMutableBag(parent)
+
+	parent.Set("parent", true)
+	child.Set("child", true)
+
+	var pb mixerpb.CompressedAttributes
+	child.ToProto(&pb, nil, 0)
+
+	mb, err := GetBagFromProto(&pb, nil)
+	if err != nil {
+		t.Errorf("failed to get bag from protobuf: %v", err)
+	}
+	names := mb.Names()
+
+	if len(names) != len(child.Names()) {
+		t.Errorf("missing attributes after round-trip. Got %v, expected %v", names, child.Names())
+	}
+
+	for _, k := range names {
+		pre, _ := child.Get(k)
+		post, _ := mb.Get(k)
+		if !reflect.DeepEqual(post, pre) {
+			t.Errorf("Got %v, expected %v for attribute %s", post, pre, k)
+		}
+	}
+}
+
 func init() {
 	// bump up the log level so log-only logic runs during the tests, for correctness and coverage.
-	o := log.NewOptions()
-	_ = o.SetOutputLevel(log.DebugLevel)
+	o := log.DefaultOptions()
+	o.SetOutputLevel(log.DefaultScopeName, log.DebugLevel)
+	o.SetOutputLevel(scope.Name(), log.DebugLevel)
 	_ = log.Configure(o)
 }

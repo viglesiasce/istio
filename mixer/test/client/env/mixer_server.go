@@ -18,12 +18,13 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync"
 	"time"
 
+	rpc "github.com/gogo/googleapis/google/rpc"
 	"google.golang.org/grpc"
 
 	mixerpb "istio.io/api/mixer/v1"
-	rpc "istio.io/gogo-genproto/googleapis/google/rpc"
 	"istio.io/istio/mixer/pkg/attribute"
 	"istio.io/istio/mixer/pkg/mockapi"
 )
@@ -33,6 +34,7 @@ type Handler struct {
 	stress  bool
 	ch      chan *attribute.MutableBag
 	count   int
+	mutex   *sync.Mutex
 	rStatus rpc.Status
 }
 
@@ -40,6 +42,7 @@ func newHandler(stress bool) *Handler {
 	h := &Handler{
 		stress:  stress,
 		count:   0,
+		mutex:   &sync.Mutex{},
 		rStatus: rpc.Status{},
 	}
 	if !stress {
@@ -50,10 +53,20 @@ func newHandler(stress bool) *Handler {
 
 func (h *Handler) run(bag attribute.Bag) rpc.Status {
 	if !h.stress {
+		h.mutex.Lock()
+		h.count++
+		h.mutex.Unlock()
 		h.ch <- attribute.CopyBag(bag)
 	}
-	h.count++
 	return h.rStatus
+}
+
+// Count get the called counter
+func (h *Handler) Count() int {
+	h.mutex.Lock()
+	c := h.count
+	h.mutex.Unlock()
+	return c
 }
 
 // MixerServer stores data for a mock Mixer server.
@@ -67,22 +80,27 @@ type MixerServer struct {
 	report *Handler
 	quota  *Handler
 
-	qma         mockapi.QuotaArgs
 	quotaAmount int64
 	quotaLimit  int64
 
 	checkReferenced *mixerpb.ReferencedAttributes
 	quotaReferenced *mixerpb.ReferencedAttributes
+
+	directive *mixerpb.RouteDirective
+
+	sync.Mutex
+	qma mockapi.QuotaArgs
 }
 
 // Check is called by the mock mixer api
-func (ts *MixerServer) Check(bag attribute.Bag, output *attribute.MutableBag) (mockapi.CheckResponse, rpc.Status) {
-	result := mockapi.CheckResponse{
-		ValidDuration: mockapi.DefaultValidDuration,
-		ValidUseCount: mockapi.DefaultValidUseCount,
-		Referenced:    ts.checkReferenced,
+func (ts *MixerServer) Check(bag attribute.Bag) mixerpb.CheckResponse_PreconditionResult {
+	return mixerpb.CheckResponse_PreconditionResult{
+		Status:               ts.check.run(bag),
+		ValidDuration:        mockapi.DefaultValidDuration,
+		ValidUseCount:        mockapi.DefaultValidUseCount,
+		ReferencedAttributes: ts.checkReferenced,
+		RouteDirective:       ts.directive,
 	}
-	return result, ts.check.run(bag)
 }
 
 // Report is called by the mock mixer api
@@ -92,7 +110,13 @@ func (ts *MixerServer) Report(bag attribute.Bag) rpc.Status {
 
 // Quota is called by the mock mixer api
 func (ts *MixerServer) Quota(bag attribute.Bag, qma mockapi.QuotaArgs) (mockapi.QuotaResponse, rpc.Status) {
-	ts.qma = qma
+	ts.Lock()
+	defer ts.Unlock()
+
+	if !ts.quota.stress {
+		// In non-stress case, saved for test verification
+		ts.qma = qma
+	}
 	status := ts.quota.run(bag)
 	qmr := mockapi.QuotaResponse{}
 	if status.Code == 0 {
@@ -138,6 +162,7 @@ func NewMixerServer(port uint16, stress bool) (*MixerServer, error) {
 }
 
 // Start starts the mixer server
+// TODO: Add a channel so this can return an error
 func (ts *MixerServer) Start() {
 	go func() {
 		err := ts.gs.Serve(ts.lis)
@@ -153,4 +178,14 @@ func (ts *MixerServer) Stop() {
 	log.Printf("Stop Mixer server\n")
 	ts.gs.Stop()
 	log.Printf("Stop Mixer server  -- Done\n")
+}
+
+// GetReport will return a received report
+func (ts *MixerServer) GetReport() *attribute.MutableBag {
+	return <-ts.report.ch
+}
+
+// GetCheck will return a received check
+func (ts *MixerServer) GetCheck() *attribute.MutableBag {
+	return <-ts.check.ch
 }

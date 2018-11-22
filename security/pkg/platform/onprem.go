@@ -19,9 +19,12 @@ import (
 	"crypto/x509"
 	"fmt"
 	"io/ioutil"
+	"os"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+
+	"strings"
 
 	"istio.io/istio/security/pkg/pki/util"
 )
@@ -36,9 +39,22 @@ type OnPremClientImpl struct {
 	certChainFile string
 }
 
+// CitadelDNSSan is the hardcoded DNS SAN used to identify citadel server.
+// The user may use an IP address to connect to the mesh.
+const CitadelDNSSan = "istio-citadel"
+
 // NewOnPremClientImpl creates a new OnPremClientImpl.
-func NewOnPremClientImpl(rootCert, key, certChain string) *OnPremClientImpl {
-	return &OnPremClientImpl{rootCert, key, certChain}
+func NewOnPremClientImpl(rootCert, key, certChain string) (*OnPremClientImpl, error) {
+	if _, err := os.Stat(rootCert); err != nil {
+		return nil, fmt.Errorf("failed to create onprem client root cert file %v error %v", rootCert, err)
+	}
+	if _, err := os.Stat(key); err != nil {
+		return nil, fmt.Errorf("failed to create onprem client key file %v", err)
+	}
+	if _, err := os.Stat(certChain); err != nil {
+		return nil, fmt.Errorf("failed to create onprem client certChain file %v", err)
+	}
+	return &OnPremClientImpl{rootCert, key, certChain}, nil
 }
 
 // GetDialOptions returns the GRPC dial options to connect to the CA.
@@ -74,7 +90,12 @@ func (ci *OnPremClientImpl) GetServiceIdentity() (string, error) {
 		return "", err
 	}
 	if len(serviceIDs) != 1 {
-		return "", fmt.Errorf("cert has %v SAN fields, should be 1", len(serviceIDs))
+		for _, s := range serviceIDs {
+			if strings.HasPrefix(s, "spiffe://") {
+				return s, nil
+			}
+		}
+		return "", fmt.Errorf("cert does not have siffe:// SAN fields")
 	}
 	return serviceIDs[0], nil
 }
@@ -119,6 +140,7 @@ func getTLSCredentials(rootCertFile, keyFile, certChainFile string) (credentials
 		Certificates: []tls.Certificate{certificate},
 	}
 	config.RootCAs = certPool
+	config.ServerName = CitadelDNSSan
 
 	return credentials.NewTLS(&config), nil
 }

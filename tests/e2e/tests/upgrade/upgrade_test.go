@@ -25,8 +25,7 @@ import (
 	"strings"
 	"testing"
 	"time"
-	// TODO(nmittler): Remove this
-	_ "github.com/golang/glog"
+
 	multierror "github.com/hashicorp/go-multierror"
 
 	"istio.io/istio/pkg/log"
@@ -35,29 +34,37 @@ import (
 )
 
 const (
-	u1                       = "normal-user"
-	u2                       = "test-user"
-	bookinfoYaml             = "samples/bookinfo/kube/bookinfo.yaml"
-	bookinfoRatingsv2Yaml    = "samples/bookinfo/kube/bookinfo-ratings-v2.yaml"
-	bookinfoRatingsMysqlYaml = "samples/bookinfo/kube/bookinfo-ratings-v2-mysql.yaml"
-	bookinfoDbYaml           = "samples/bookinfo/kube/bookinfo-db.yaml"
-	bookinfoMysqlYaml        = "samples/bookinfo/kube/bookinfo-mysql.yaml"
-	modelDir                 = "tests/apps/bookinfo/output"
-	rulesDir                 = "samples/bookinfo/kube"
-	allRule                  = "route-rule-all-v1.yaml"
-	testRule                 = "route-rule-reviews-test-v2.yaml"
+	bookinfoYaml    = "samples/bookinfo/platform/kube/bookinfo.yaml"
+	bookinfoGateway = "bookinfo-gateway.yaml"
+	modelDir        = "tests/apps/bookinfo/output"
+	rulesDir        = "samples/bookinfo/networking"
+	allRule         = "virtual-service-all-v1.yaml"
+	testRule        = "virtual-service-reviews-test-v2.yaml"
+	testRetryTimes  = 10
 )
 
 var (
+	u1 = user{
+		username:      "normal-user",
+		sessionCookie: "eyJ1c2VyIjoibm9ybWFsLXVzZXIifQ.Di_G8A.9xNK4BEiyV0-vPOB3mWF6_PXKrw",
+	}
+	u2 = user{
+		username:      "test-user",
+		sessionCookie: "eyJ1c2VyIjoidGVzdC11c2VyIn0.Di_NWg.BQ9nq-xSfqKqsT2Rd-Uh2Hg4b0I",
+	}
 	tc                *testConfig
 	baseConfig        *framework.CommonConfig
 	targetConfig      *framework.CommonConfig
-	testRetryTimes    = 5
-	defaultRules      = []string{allRule, testRule}
+	defaultRules      = []string{allRule, testRule, bookinfoGateway}
 	flagBaseVersion   = flag.String("base_version", "0.4.0", "Base version to upgrade from.")
 	flagTargetVersion = flag.String("target_version", "0.5.1", "Target version to upgrade to.")
 	flagSmoothCheck   = flag.Bool("smooth_check", false, "Whether to check the upgrade is smooth.")
 )
+
+type user struct {
+	username      string
+	sessionCookie string
+}
 
 type testConfig struct {
 	*framework.CommonConfig
@@ -66,7 +73,6 @@ type testConfig struct {
 }
 
 func (t *testConfig) Setup() error {
-	t.gateway = "http://" + tc.Kube.Ingress
 	//generate rule yaml files, replace "jason" with actual user
 	for _, rule := range defaultRules {
 		src := util.GetResourcePath(filepath.Join(rulesDir, rule))
@@ -77,7 +83,7 @@ func (t *testConfig) Setup() error {
 			return err
 		}
 		content := string(ori)
-		content = strings.Replace(content, "jason", u2, -1)
+		content = strings.Replace(content, "jason", u2.username, -1)
 		err = ioutil.WriteFile(dest, []byte(content), 0600)
 		if err != nil {
 			log.Errorf("Failed to write into new rule file %s", dest)
@@ -86,9 +92,16 @@ func (t *testConfig) Setup() error {
 
 	}
 
-	if !util.CheckPodsRunning(tc.Kube.Namespace) {
+	if !util.CheckPodsRunning(tc.Kube.Namespace, tc.Kube.KubeConfig) {
 		return fmt.Errorf("can't get all pods running")
 	}
+
+	gateway, errGw := tc.Kube.Ingress()
+	if errGw != nil {
+		return errGw
+	}
+
+	t.gateway = gateway
 
 	return setUpDefaultRouting()
 }
@@ -141,39 +154,39 @@ func inspect(err error, fMsg, sMsg string, t *testing.T) {
 	}
 }
 
-func probeGateway() error {
+func probeGateway(retryTimes int) error {
+	var err1, err2 error
 	standby := 0
-	for i := 0; i <= testRetryTimes; i++ {
+	v1File := util.GetResourcePath(filepath.Join(modelDir, "productpage-normal-user-v1.html"))
+	v2File := util.GetResourcePath(filepath.Join(modelDir, "productpage-test-user-v2.html"))
+	for i := 0; i <= retryTimes; i++ {
 		time.Sleep(time.Duration(standby) * time.Second)
-		resp, err := http.Get(fmt.Sprintf("%s/productpage", tc.gateway))
-		if err != nil {
-			log.Infof("Error talking to productpage: %s", err)
-		} else {
-			log.Infof("Get from page: %d", resp.StatusCode)
-			if resp.StatusCode == http.StatusOK {
-				log.Info("Get response from product page!")
-				break
-			}
-			closeResponseBody(resp)
-		}
-		if i == testRetryTimes {
-			return errors.New("unable to set default route")
+		_, err1 = checkRoutingResponse(u1, "v1", tc.gateway, v1File)
+		_, err2 = checkRoutingResponse(u2, "v2", tc.gateway, v2File)
+		if err1 == nil && err2 == nil {
+			log.Infof("Successfully getting response from gateway.")
+			return nil
 		}
 		standby += 5
 		log.Warnf("Couldn't get to the bookinfo product page, trying again in %d second", standby)
 	}
-	log.Info("Success! Default route got expected response")
-	return nil
+	if err1 != nil {
+		log.Errorf("Failed version routing! %s in v1: %s", u1, err1)
+	}
+	if err2 != nil {
+		log.Errorf("Failed version routing! %s in v2: %s", u2, err2)
+	}
+	return errors.New("unable to get valid response from gateway")
 }
 
 func setUpDefaultRouting() error {
 	if err := applyRules(defaultRules); err != nil {
 		return fmt.Errorf("could not apply rule '%s': %v", allRule, err)
 	}
-	return probeGateway()
+	return probeGateway(testRetryTimes)
 }
 
-func checkRoutingResponse(user, version, gateway, modelFile string) (int, error) {
+func checkRoutingResponse(user user, version, gateway, modelFile string) (int, error) {
 	startT := time.Now()
 	cookies := []http.Cookie{
 		{
@@ -181,8 +194,8 @@ func checkRoutingResponse(user, version, gateway, modelFile string) (int, error)
 			Value: "bar",
 		},
 		{
-			Name:  "user",
-			Value: user,
+			Name:  "session",
+			Value: user.sessionCookie,
 		},
 	}
 	resp, err := getWithCookie(fmt.Sprintf("%s/productpage", gateway), cookies)
@@ -199,7 +212,6 @@ func checkRoutingResponse(user, version, gateway, modelFile string) (int, error)
 	}
 
 	if err = util.CompareToFile(body, modelFile); err != nil {
-		log.Errorf("Error: User %s in version %s didn't get expected response", user, version)
 		duration = -1
 	}
 	closeResponseBody(resp)
@@ -210,7 +222,7 @@ func deleteRules(ruleKeys []string) error {
 	var err error
 	for _, ruleKey := range ruleKeys {
 		rule := filepath.Join(tc.rulesDir, ruleKey)
-		if e := util.KubeDelete(tc.Kube.Namespace, rule); e != nil {
+		if e := util.KubeDelete(tc.Kube.Namespace, rule, tc.Kube.KubeConfig); e != nil {
 			err = multierror.Append(err, e)
 		}
 	}
@@ -222,7 +234,7 @@ func deleteRules(ruleKeys []string) error {
 func applyRules(ruleKeys []string) error {
 	for _, ruleKey := range ruleKeys {
 		rule := filepath.Join(tc.rulesDir, ruleKey)
-		if err := util.KubeApply(tc.Kube.Namespace, rule); err != nil {
+		if err := util.KubeApply(tc.Kube.Namespace, rule, tc.Kube.KubeConfig); err != nil {
 			//log.Errorf("Kubectl apply %s failed", rule)
 			return err
 		}
@@ -232,38 +244,38 @@ func applyRules(ruleKeys []string) error {
 	return nil
 }
 
-func checkTraffic(t *testing.T) {
-	// Check whether gateway is reachable
-	err := probeGateway()
-	inspect(err, "Failed to reach Gateway after upgrade", "", t)
-	// Check whether routes are correct.
-	v1File := util.GetResourcePath(filepath.Join(modelDir, "productpage-normal-user-v1.html"))
-	v2File := util.GetResourcePath(filepath.Join(modelDir, "productpage-test-user-v2.html"))
-	_, err = checkRoutingResponse(u1, "v1", tc.gateway, v1File)
-	inspect(
-		err, fmt.Sprintf("Failed version routing! %s in v1", u1),
-		fmt.Sprintf("Success! Response matches with expected! %s in v1", u1), t)
-	_, err = checkRoutingResponse(u2, "v2", tc.gateway, v2File)
-	inspect(
-		err, fmt.Sprintf("Failed version routing! %s in v2", u2),
-		fmt.Sprintf("Success! Response matches with expected! %s in v2", u2), t)
+func pruneDeprecatedResources() {
+	if err := util.DeleteDeployment("istio-ca", tc.Kube.Namespace, tc.Kube.KubeConfig); err != nil {
+		log.Warnf("Delete deployment istio-ca failed %q", err)
+	}
+	if err := util.DeleteDeployment("istio-mixer", tc.Kube.Namespace, tc.Kube.KubeConfig); err != nil {
+		log.Warnf("Delete deployment istio-mixer failed %q", err)
+	}
 }
 
 func upgradeControlPlane() error {
+	if baseConfig.Kube.BaseVersion <= "0.7.1" {
+		pruneDeprecatedResources()
+	}
 	// Generate and deploy Isito yaml files.
 	err := targetConfig.Kube.Setup()
 	if err != nil {
 		return err
 	}
-	if !util.CheckPodsRunning(targetConfig.Kube.Namespace) {
-		return fmt.Errorf("can't get all pods running")
+	if !util.CheckPodsRunningWithMaxDuration(targetConfig.Kube.Namespace, 600*time.Second, tc.Kube.KubeConfig) {
+		return fmt.Errorf("can't get all pods running when upgrading control plane")
 	}
 	if _, err = util.Shell("kubectl get all -n %s -o wide", targetConfig.Kube.Namespace); err != nil {
 		return err
 	}
 	// TODO: Check control plane version.
 	// Update gateway address
-	tc.gateway = "http://" + targetConfig.Kube.Ingress
+	gateway, errGw := targetConfig.Kube.Ingress()
+	if errGw != nil {
+		return errGw
+	}
+
+	tc.gateway = gateway
 	return nil
 }
 
@@ -276,26 +288,32 @@ func upgradeSidecars() error {
 	if err != nil {
 		return err
 	}
-	if !util.CheckPodsRunning(targetConfig.Kube.Namespace) {
-		return fmt.Errorf("can't get all pods running")
+	if !util.CheckPodsRunningWithMaxDuration(targetConfig.Kube.Namespace, 600*time.Second, tc.Kube.KubeConfig) {
+		return fmt.Errorf("can't get all pods running when upgrading sidecar")
 	}
 	// TODO: Check sidecar version.
 	return nil
 }
 
 func TestUpgrade(t *testing.T) {
-	checkTraffic(t)
+	t.Skip("https://github.com/istio/istio/issues/4937")
+
 	err := upgradeControlPlane()
 	inspect(err, "Failed to upgrade control plane", "Control plane upgraded.", t)
 	if err != nil {
 		return
 	}
 	if *flagSmoothCheck {
-		checkTraffic(t)
+		err = probeGateway(testRetryTimes)
+		inspect(err, "Probing Gateway failed after control plane upgraded.", "", t)
 	}
 	err = upgradeSidecars()
 	inspect(err, "Failed to upgrade sidecars.", "Sidecar upgraded.", t)
-	checkTraffic(t)
+	if err != nil {
+		return
+	}
+	err = probeGateway(testRetryTimes)
+	inspect(err, "Probing Gateway failed after sidecar upgraded.", "", t)
 }
 
 func setTestConfig() error {
@@ -308,19 +326,9 @@ func setTestConfig() error {
 	if err != nil {
 		return err
 	}
-	demoApps := []framework.App{{AppYaml: util.GetResourcePath(bookinfoYaml),
-		KubeInject: true,
-	},
-		{AppYaml: util.GetResourcePath(bookinfoRatingsv2Yaml),
-			KubeInject: true,
-		},
-		{AppYaml: util.GetResourcePath(bookinfoRatingsMysqlYaml),
-			KubeInject: true,
-		},
-		{AppYaml: util.GetResourcePath(bookinfoDbYaml),
-			KubeInject: true,
-		},
-		{AppYaml: util.GetResourcePath(bookinfoMysqlYaml),
+	demoApps := []framework.App{
+		{
+			AppYaml:    util.GetResourcePath(bookinfoYaml),
 			KubeInject: true,
 		},
 	}
@@ -335,9 +343,10 @@ func setTestConfig() error {
 }
 
 func TestMain(m *testing.M) {
-	flag.Parse()
-	check(framework.InitLogging(), "cannot setup logging")
-	check(setTestConfig(), "could not create TestConfig")
-	tc.Cleanup.RegisterCleanable(tc)
-	os.Exit(tc.RunTest(m))
+	// https://github.com/istio/istio/issues/4937
+	// flag.Parse()
+	// check(framework.InitLogging(), "cannot setup logging")
+	// check(setTestConfig(), "could not create TestConfig")
+	// tc.Cleanup.RegisterCleanable(tc)
+	// os.Exit(tc.RunTest(m))
 }

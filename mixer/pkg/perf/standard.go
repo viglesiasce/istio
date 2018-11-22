@@ -22,16 +22,14 @@ import (
 
 // MinimalConfig is a very basic configuration, mainly useful for testing the perf infrastructure itself,
 var MinimalConfig = Config{
-	Service:                 minimalSvcCfg,
-	Global:                  minimalGlobalCfg,
-	IdentityAttribute:       `destination.rpcServer`,
-	IdentityAttributeDomain: `svc.cluster.local`,
+	Service: minimalSvcCfg,
+	Global:  minimalGlobalCfg,
 }
 
 // MinimalSetup is a very basic setup, mainly useful for testing the perf infrastructure itself.
 var MinimalSetup = Setup{
 	Config: MinimalConfig,
-	Load: Load{
+	Loads: []Load{{
 		Multiplier:  100,
 		StableOrder: false,
 		Requests: []Request{
@@ -61,7 +59,7 @@ var MinimalSetup = Setup{
 				},
 			},
 		},
-	},
+	}},
 }
 
 const (
@@ -75,7 +73,7 @@ spec:
     attributes:
       source.name:
         value_type: STRING
-      target.name:
+      destination.name:
         value_type: STRING
       response.count:
         value_type: INT64
@@ -108,7 +106,7 @@ spec:
   value: "2"
   dimensions:
     source: source.name | "mysrc"
-    target_ip: target.name | "mytarget"
+    target_ip: destination.name | "mytarget"
 
 ---
 
@@ -118,7 +116,7 @@ metadata:
   name: rule1
   namespace: istio-system
 spec:
-  selector: match(target.name, "*")
+  selector: match(destination.name, "*")
   actions:
   - handler: fakeHandlerConfig.fakeHandler
     instances:

@@ -16,6 +16,9 @@ package platform
 
 import (
 	"testing"
+	// Temporarily disable ID token authentication on CSR API.
+	// [TODO](myidpt): enable when the Citadel authz can work correctly.
+	// "cloud.google.com/go/compute/metadata"
 )
 
 func TestNewClient(t *testing.T) {
@@ -26,34 +29,38 @@ func TestNewClient(t *testing.T) {
 		certChainFile string
 		caAddr        string
 		expectedErr   string
-		expectedType  string
 	}{
 		"onprem test": {
 			platform:      "onprem",
-			rootCertFile:  "testdata/root-cert-good.pem",
-			keyFile:       "testdata/key-good.pem",
-			certChainFile: "testdata/cert-chain-good.pem",
+			rootCertFile:  "testdata/cert-root-good.pem",
+			keyFile:       "testdata/key-from-root-good.pem",
+			certChainFile: "testdata/cert-from-root-good.pem",
 			caAddr:        "localhost",
 			expectedErr:   "",
-			expectedType:  "onprem",
 		},
 		"gcp test": {
 			platform:      "gcp",
-			rootCertFile:  "testdata/root-cert-good.pem",
-			keyFile:       "testdata/key-good.pem",
+			rootCertFile:  "testdata/cert-root-good.pem",
+			keyFile:       "testdata/key-from-root-good.pem",
 			certChainFile: "testdata/cert-chain-good.pem",
 			caAddr:        "localhost",
-			expectedErr:   "",
-			expectedType:  "gcp",
+			expectedErr:   "GCP credential authentication in CSR API is disabled", // No error when ID token auth is enabled.
 		},
 		"aws test": {
 			platform:      "aws",
-			rootCertFile:  "testdata/root-cert-good.pem",
-			keyFile:       "testdata/key-good.pem",
+			rootCertFile:  "testdata/cert-root-good.pem",
+			keyFile:       "testdata/key-from-root-good.pem",
+			certChainFile: "testdata/cert-chain-good.pem",
+			caAddr:        "localhost",
+			expectedErr:   "AWS credential authentication in CSR API is disabled", // No error when ID token auth is enabled.
+		},
+		"unspecified test": {
+			platform:      "unspecified",
+			rootCertFile:  "testdata/cert-root-good.pem",
+			keyFile:       "testdata/key-from-root-good.pem",
 			certChainFile: "testdata/cert-chain-good.pem",
 			caAddr:        "localhost",
 			expectedErr:   "",
-			expectedType:  "aws",
 		},
 		"invalid test": {
 			platform:    "invalid",
@@ -77,9 +84,20 @@ func TestNewClient(t *testing.T) {
 		}
 
 		credentialType := client.GetCredentialType()
-		if credentialType != tc.expectedType {
+		expectedType := tc.platform
+		if expectedType == "unspecified" {
+			// Temporarily disable ID token authentication on CSR API.
+			// [TODO](myidpt): enable when the Citadel authz can work correctly.
+			// if metadata.OnGCE() {
+			//   expectedType = "gcp"
+			// } else {
+			//   expectedType = "onprem"
+			// }
+			expectedType = "onprem"
+		}
+		if credentialType != expectedType {
 			t.Errorf("%s: Wrong Credential Type. Expected %v, Actual %v", id,
-				string(tc.expectedType), string(credentialType))
+				string(expectedType), string(credentialType))
 		}
 	}
 }

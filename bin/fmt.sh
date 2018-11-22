@@ -1,9 +1,17 @@
 #!/bin/bash
 
 # Applies requisite code formatters to the source tree
+# fmt.sh -c check only.
 
 set -e
 SCRIPTPATH=$( cd "$(dirname "$0")" ; pwd -P )
+
+check=false
+
+case $1 in
+    -c|--check)
+    check=true
+esac
 
 ROOTDIR=$SCRIPTPATH/..
 cd $ROOTDIR
@@ -11,12 +19,8 @@ cd $ROOTDIR
 export GOPATH=$(cd $ROOTDIR/../../..; pwd)
 export PATH=$GOPATH/bin:$PATH
 
-if which goimports; then
-  goimports=`which goimports`
-else
-  go get golang.org/x/tools/cmd/goimports
-  goimports=${GOPATH}/bin/goimports
-fi
+go get -u golang.org/x/tools/cmd/goimports
+goimports=${GOPATH}/bin/goimports
 
 PKGS=${PKGS:-"."}
 if [[ -z ${GO_FILES} ]];then
@@ -25,14 +29,15 @@ fi
 
 UX=$(uname)
 
-#remove blank lines so gofmt / goimports can do their job
-for fl in ${GO_FILES}; do
-  if [[ ${UX} == "Darwin" ]];then
-    sed -i '' -e "/^import[[:space:]]*(/,/)/{ /^\s*$/d;}" $fl
-  else
-    sed -i -e "/^import[[:space:]]*(/,/)/{ /^\s*$/d;}" $fl
+if [ $check = false ]; then
+  $goimports -w -local istio.io ${GO_FILES}
+  exit $?
 fi
-done
 
-gofmt -s -w ${GO_FILES}
-$goimports -w -local istio.io ${GO_FILES}
+for fl in ${GO_FILES}; do
+  file_needs_formatting=$($goimports -l -local istio.io $fl)
+  if [[ ! -z "$file_needs_formatting" ]]; then
+    echo "please run bin/fmt.sh against: $file_needs_formatting"
+    exit 1
+  fi
+done

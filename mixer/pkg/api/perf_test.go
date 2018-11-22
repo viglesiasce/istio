@@ -27,8 +27,9 @@ import (
 	mixerpb "istio.io/api/mixer/v1"
 	"istio.io/istio/mixer/pkg/adapter"
 	"istio.io/istio/mixer/pkg/attribute"
+	"istio.io/istio/mixer/pkg/loadshedding"
 	"istio.io/istio/mixer/pkg/pool"
-	"istio.io/istio/mixer/pkg/runtime"
+	"istio.io/istio/mixer/pkg/runtime/dispatcher"
 	"istio.io/istio/mixer/pkg/status"
 )
 
@@ -53,7 +54,7 @@ func (bs *benchState) createGRPCServer() (string, error) {
 	bs.gp = pool.NewGoroutinePool(32, false)
 	bs.gp.AddWorkers(32)
 
-	ms := NewGRPCServer(bs, bs.gp)
+	ms := NewGRPCServer(bs, bs.gp, nil, loadshedding.NewThrottler(loadshedding.DefaultOptions()))
 	bs.s = ms.(*grpcServer)
 	mixerpb.RegisterMixerServer(bs.gs, bs.s)
 
@@ -110,21 +111,32 @@ func (bs *benchState) Preprocess(ctx context.Context, requestBag attribute.Bag, 
 	return nil
 }
 
-func (bs *benchState) Check(ctx context.Context, bag attribute.Bag) (*adapter.CheckResult, error) {
-	result := &adapter.CheckResult{
+func (bs *benchState) Check(ctx context.Context, bag attribute.Bag) (adapter.CheckResult, error) {
+	result := adapter.CheckResult{
 		Status: status.OK,
 	}
 	return result, nil
 }
 
-func (bs *benchState) Report(_ context.Context, _ attribute.Bag) error {
+func (bs *benchState) GetReporter(ctx context.Context) dispatcher.Reporter {
+	return bs
+}
+
+func (bs *benchState) Report(bag attribute.Bag) error {
 	return nil
 }
 
-func (bs *benchState) Quota(ctx context.Context, requestBag attribute.Bag,
-	qma *runtime.QuotaMethodArgs) (*adapter.QuotaResult, error) {
+func (bs *benchState) Flush() error {
+	return nil
+}
 
-	qr := &adapter.QuotaResult{
+func (bs *benchState) Done() {
+}
+
+func (bs *benchState) Quota(ctx context.Context, requestBag attribute.Bag,
+	qma dispatcher.QuotaMethodArgs) (adapter.QuotaResult, error) {
+
+	qr := adapter.QuotaResult{
 		Status: status.OK,
 		Amount: 42,
 	}
@@ -226,8 +238,8 @@ func getGlobalDict() []string {
 		"response.time",
 		"source.namespace",
 		"source.uid",
-		"target.namespace",
-		"target.uid",
+		"destination.namespace",
+		"destination.uid",
 	}
 }
 
@@ -260,6 +272,6 @@ func setRequestAttrs(bag *attribute.MutableBag, uuid []byte) {
 	bag.Set("response.time", time.Now())
 	bag.Set("source.namespace", "XYZ11")
 	bag.Set("source.uid", "POD11")
-	bag.Set("target.namespace", "XYZ222")
-	bag.Set("target.uid", "POD222")
+	bag.Set("destination.namespace", "XYZ222")
+	bag.Set("destination.uid", "POD222")
 }

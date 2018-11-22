@@ -19,24 +19,30 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
+	"time"
 
 	grpc_middleware "github.com/grpc-ecosystem/go-grpc-middleware"
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/grpc-ecosystem/grpc-opentracing/go/otgrpc"
 	ot "github.com/opentracing/opentracing-go"
 	"google.golang.org/grpc"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	mixerpb "istio.io/api/mixer/v1"
 	"istio.io/istio/mixer/pkg/adapter"
 	"istio.io/istio/mixer/pkg/api"
+	"istio.io/istio/mixer/pkg/checkcache"
 	"istio.io/istio/mixer/pkg/config"
+	"istio.io/istio/mixer/pkg/config/crd"
 	"istio.io/istio/mixer/pkg/config/store"
-	"istio.io/istio/mixer/pkg/expr"
-	"istio.io/istio/mixer/pkg/il/evaluator"
+	"istio.io/istio/mixer/pkg/loadshedding"
 	"istio.io/istio/mixer/pkg/pool"
-	mixerRuntime "istio.io/istio/mixer/pkg/runtime"
-	mixerRuntime2 "istio.io/istio/mixer/pkg/runtime2"
+	"istio.io/istio/mixer/pkg/runtime"
+	rc "istio.io/istio/mixer/pkg/runtime/config"
+	"istio.io/istio/mixer/pkg/runtime/dispatcher"
 	"istio.io/istio/mixer/pkg/template"
+	"istio.io/istio/pkg/ctrlz"
 	"istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/probe"
 	"istio.io/istio/pkg/tracing"
@@ -51,9 +57,9 @@ type Server struct {
 	listener  net.Listener
 	monitor   *monitor
 	tracer    io.Closer
-	configDir string
 
-	dispatcher mixerRuntime.Dispatcher
+	checkCache *checkcache.Cache
+	dispatcher dispatcher.Dispatcher
 
 	// probes
 	livenessProbe  probe.Controller
@@ -61,20 +67,18 @@ type Server struct {
 	*probe.Probe
 }
 
+type listenFunc func(network string, address string) (net.Listener, error)
+
 // replaceable set of functions for fault injection
 type patchTable struct {
-	newILEvaluator func(cacheSize int) (*evaluator.IL, error)
-	newStore       func(r2 *store.Registry, configURL string) (store.Store, error)
-	newRuntime     func(eval expr.Evaluator, typeChecker expr.TypeChecker, vocab mixerRuntime.VocabularyChangeListener,
-		gp *pool.GoroutinePool, handlerPool *pool.GoroutinePool,
-		identityAttribute string, defaultConfigNamespace string, s store.Store, adapterInfo map[string]*adapter.Info,
-		templateInfo map[string]template.Info) (mixerRuntime.Dispatcher, error)
-	newRuntime2 func(s store.Store, templates map[string]*template.Info, adapters map[string]*adapter.Info,
-		identityAttribute string, defaultConfigNamespace string, executorPool *pool.GoroutinePool,
-		handlerPool *pool.GoroutinePool, enableTracing bool) *mixerRuntime2.Runtime
+	newRuntime func(s store.Store, templates map[string]*template.Info, adapters map[string]*adapter.Info,
+		defaultConfigNamespace string, executorPool *pool.GoroutinePool,
+		handlerPool *pool.GoroutinePool, enableTracing bool) *runtime.Runtime
 	configTracing func(serviceName string, options *tracing.Options) (io.Closer, error)
-	startMonitor  func(port uint16, enableProfiling bool) (*monitor, error)
-	listen        func(network string, address string) (net.Listener, error)
+	startMonitor  func(port uint16, enableProfiling bool, lf listenFunc) (*monitor, error)
+	listen        listenFunc
+	configLog     func(options *log.Options) error
+	runtimeListen func(runtime *runtime.Runtime) error
 }
 
 // New instantiates a fully functional Mixer server, ready for traffic.
@@ -84,13 +88,12 @@ func New(a *Args) (*Server, error) {
 
 func newPatchTable() *patchTable {
 	return &patchTable{
-		newILEvaluator: evaluator.NewILEvaluator,
-		newStore:       func(r2 *store.Registry, configURL string) (store.Store, error) { return r2.NewStore(configURL) },
-		newRuntime:     mixerRuntime.New,
-		newRuntime2:    mixerRuntime2.New,
-		configTracing:  tracing.Configure,
-		startMonitor:   startMonitor,
-		listen:         net.Listen,
+		newRuntime:    runtime.New,
+		configTracing: tracing.Configure,
+		startMonitor:  startMonitor,
+		listen:        net.Listen,
+		configLog:     log.Configure,
+		runtimeListen: func(rt *runtime.Runtime) error { return rt.StartListening() },
 	}
 }
 
@@ -99,13 +102,8 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 		return nil, err
 	}
 
-	if err := log.Configure(a.LoggingOptions); err != nil {
+	if err := p.configLog(a.LoggingOptions); err != nil {
 		return nil, err
-	}
-
-	eval, err := p.newILEvaluator(a.ExpressionEvalCacheSize)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create IL expression evaluator with cache size %d: %v", a.ExpressionEvalCacheSize, err)
 	}
 
 	apiPoolSize := a.APIWorkerPoolSize
@@ -130,6 +128,7 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 	grpcOptions = append(grpcOptions, grpc.MaxMsgSize(int(a.MaxMessageSize)))
 
 	var interceptors []grpc.UnaryServerInterceptor
+	var err error
 
 	if a.TracingOptions.TracingEnabled() {
 		s.tracer, err = p.configTracing("istio-mixer", a.TracingOptions)
@@ -145,15 +144,30 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 	grpc_prometheus.EnableHandlingTimeHistogram()
 	grpcOptions = append(grpcOptions, grpc.UnaryInterceptor(grpc_middleware.ChainUnaryServer(interceptors...)))
 
-	if s.monitor, err = p.startMonitor(a.MonitoringPort, a.EnableProfiling); err != nil {
-		_ = s.Close()
-		return nil, fmt.Errorf("unable to setup monitoring: %v", err)
+	// get the network stuff setup
+	network := "tcp"
+	address := fmt.Sprintf(":%d", a.APIPort)
+	if a.APIAddress != "" {
+		idx := strings.Index(a.APIAddress, "://")
+		if idx < 0 {
+			address = a.APIAddress
+		} else {
+			network = a.APIAddress[:idx]
+			address = a.APIAddress[idx+3:]
+		}
 	}
 
-	// get the network stuff setup
-	if s.listener, err = p.listen("tcp", fmt.Sprintf(":%d", a.APIPort)); err != nil {
+	if network == "unix" {
+		// remove Unix socket before use.
+		if err = os.Remove(address); err != nil && !os.IsNotExist(err) {
+			// Anything other than "file not found" is an error.
+			return nil, fmt.Errorf("unable to remove unix://%s: %v", address, err)
+		}
+	}
+
+	if s.listener, err = p.listen(network, address); err != nil {
 		_ = s.Close()
-		return nil, fmt.Errorf("unable to listen on socket: %v", err)
+		return nil, fmt.Errorf("unable to listen: %v", err)
 	}
 
 	st := a.ConfigStore
@@ -161,6 +175,7 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 		_ = s.Close()
 		return nil, fmt.Errorf("invalid arguments: both ConfigStore and ConfigStoreURL are specified")
 	}
+
 	if st == nil {
 		configStoreURL := a.ConfigStoreURL
 		if configStoreURL == "" {
@@ -168,59 +183,73 @@ func newServer(a *Args, p *patchTable) (*Server, error) {
 		}
 
 		reg := store.NewRegistry(config.StoreInventory()...)
-		if st, err = p.newStore(reg, configStoreURL); err != nil {
+		groupVersion := &schema.GroupVersion{Group: crd.ConfigAPIGroup, Version: crd.ConfigAPIVersion}
+		if st, err = reg.NewStore(configStoreURL, groupVersion, rc.CriticalKinds()); err != nil {
 			_ = s.Close()
 			return nil, fmt.Errorf("unable to connect to the configuration server: %v", err)
 		}
 	}
 
-	var rt *mixerRuntime2.Runtime
-	var dispatcher mixerRuntime.Dispatcher
-	if a.UseNewRuntime {
-		templateMap := make(map[string]*template.Info, len(a.Templates))
-		for k, v := range a.Templates {
-			t := v // Make a local copy, otherwise we end up capturing the location of the last entry
-			templateMap[k] = &t
-		}
-
-		rt = p.newRuntime2(st, templateMap, adapterMap, a.ConfigIdentityAttribute, a.ConfigDefaultNamespace,
-			s.gp, s.adapterGP, a.TracingOptions.TracingEnabled())
-
-		if err = rt.StartListening(); err != nil {
-			_ = s.Close()
-			return nil, fmt.Errorf("unable to create runtime2 dispatcherForTesting: %v", err)
-		}
-		dispatcher = rt.Dispatcher()
-	} else {
-		if dispatcher, err = p.newRuntime(eval, evaluator.NewTypeChecker(), eval, s.gp, s.adapterGP,
-			a.ConfigIdentityAttribute, a.ConfigDefaultNamespace, st, adapterMap, a.Templates); err != nil {
-			_ = s.Close()
-			return nil, fmt.Errorf("unable to create runtime dispatcherForTesting: %v", err)
-		}
+	var rt *runtime.Runtime
+	templateMap := make(map[string]*template.Info, len(a.Templates))
+	for k, v := range a.Templates {
+		t := v // Make a local copy, otherwise we end up capturing the location of the last entry
+		templateMap[k] = &t
 	}
-	s.dispatcher = dispatcher
+
+	rt = p.newRuntime(st, templateMap, adapterMap, a.ConfigDefaultNamespace,
+		s.gp, s.adapterGP, a.TracingOptions.TracingEnabled())
+
+	// this method initializes the store
+	if err = p.runtimeListen(rt); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("unable to listen: %v", err)
+	}
+
+	// block wait for the config store to sync
+	log.Info("Awaiting for config store sync...")
+	if err := st.WaitForSynced(30 * time.Second); err != nil {
+		return nil, err
+	}
+
+	s.dispatcher = rt.Dispatcher()
+
+	if a.NumCheckCacheEntries > 0 {
+		s.checkCache = checkcache.New(a.NumCheckCacheEntries)
+	}
 
 	// get the grpc server wired up
 	grpc.EnableTracing = a.EnableGRPCTracing
+
+	throttler := loadshedding.NewThrottler(a.LoadSheddingOptions)
+	if eval := throttler.Evaluator(loadshedding.GRPCLatencyEvaluatorName); eval != nil {
+		grpcOptions = append(grpcOptions, grpc.StatsHandler(eval.(*loadshedding.GRPCLatencyEvaluator)))
+	}
+
 	s.server = grpc.NewServer(grpcOptions...)
-	mixerpb.RegisterMixerServer(s.server, api.NewGRPCServer(dispatcher, s.gp))
+
+	mixerpb.RegisterMixerServer(s.server, api.NewGRPCServer(s.dispatcher, s.gp, s.checkCache, throttler))
 
 	if a.LivenessProbeOptions.IsValid() {
 		s.livenessProbe = probe.NewFileController(a.LivenessProbeOptions)
 		s.RegisterProbe(s.livenessProbe, "server")
 		s.livenessProbe.Start()
 	}
+
 	if a.ReadinessProbeOptions.IsValid() {
 		s.readinessProbe = probe.NewFileController(a.ReadinessProbeOptions)
-		if e, ok := s.dispatcher.(probe.SupportsProbe); ok {
-			e.RegisterProbe(s.readinessProbe, "dispatcher")
-		}
-		if rt != nil {
-			rt.RegisterProbe(s.readinessProbe, "dispatcher2")
-		}
+		rt.RegisterProbe(s.readinessProbe, "dispatcher")
 		st.RegisterProbe(s.readinessProbe, "store")
 		s.readinessProbe.Start()
 	}
+
+	log.Info("Starting monitor server...")
+	if s.monitor, err = p.startMonitor(a.MonitoringPort, a.EnableProfiling, p.listen); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("unable to setup monitoring: %v", err)
+	}
+
+	go ctrlz.Run(a.IntrospectionOptions, nil)
 
 	return s, nil
 }
@@ -256,6 +285,10 @@ func (s *Server) Close() error {
 		_ = s.Wait()
 	}
 
+	if s.checkCache != nil {
+		_ = s.checkCache.Close()
+	}
+
 	if s.listener != nil {
 		_ = s.listener.Close()
 	}
@@ -274,10 +307,6 @@ func (s *Server) Close() error {
 
 	if s.adapterGP != nil {
 		_ = s.adapterGP.Close()
-	}
-
-	if s.configDir != "" {
-		_ = os.RemoveAll(s.configDir)
 	}
 
 	if s.livenessProbe != nil {
@@ -301,6 +330,6 @@ func (s *Server) Addr() net.Addr {
 
 // Dispatcher returns the dispatcher that was created during server creation. This should only
 // be used for testing purposes only.
-func (s *Server) Dispatcher() mixerRuntime.Dispatcher {
+func (s *Server) Dispatcher() dispatcher.Dispatcher {
 	return s.dispatcher
 }

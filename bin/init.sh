@@ -35,8 +35,6 @@ GO_TOP=$(cd $(dirname $0)/../../../..; pwd)
 
 export OUT_DIR=${OUT_DIR:-${GO_TOP}/out}
 
-HELM_VER=v2.7.2
-
 export GOPATH=${GOPATH:-$GO_TOP}
 # Normally set by Makefile
 export ISTIO_BIN=${ISTIO_BIN:-${GOPATH}/bin}
@@ -45,29 +43,22 @@ export ISTIO_BIN=${ISTIO_BIN:-${GOPATH}/bin}
 export GOARCH=${GOARCH:-'amd64'}
 
 # Determine the OS. Matches logic in the Makefile.
-LOCAL_OS="`uname`"
+LOCAL_OS=${LOCAL_OS:-"`uname`"}
 case $LOCAL_OS in
   'Linux')
-    OS='Linux'
+    export GOOS=${GOOS:-"linux"}
     ;;
   'Darwin')
-    OS='Mac'
+    export GOOS=${GOOS:-"darwin"}
     ;;
   *)
     echo "This system's OS ${LOCAL_OS} isn't recognized/supported"
     exit 1
     ;;
 esac
-export GOOS=${GOOS:-LOCAL_OS}
 
 # test scripts seem to like to run this script directly rather than use make
 export ISTIO_OUT=${ISTIO_OUT:-${ISTIO_BIN}}
-
-# Ensure expected GOPATH setup
-if [ ${ROOT} != "${GO_TOP:-$HOME/go}/src/istio.io/istio" ]; then
-       echo "Istio not found in GOPATH/src/istio.io/"
-       exit 1
-fi
 
 # Download Envoy debug and release binaries for Linux x86_64. They will be included in the
 # docker images created by Dockerfile.proxy and Dockerfile.proxy_debug.
@@ -98,28 +89,40 @@ set_download_command () {
     exit 1
 }
 
+if [ -z ${PROXY_REPO_SHA:-} ] ; then
+  export PROXY_REPO_SHA=$(grep PROXY_REPO_SHA istio.deps  -A 4 | grep lastStableSHA | cut -f 4 -d '"')
+fi
+
 # Normally set by the Makefile.
-ISTIO_ENVOY_VERSION=${ISTIO_ENVOY_VERSION:-${PROXY_TAG}}
+ISTIO_ENVOY_VERSION=${ISTIO_ENVOY_VERSION:-${PROXY_REPO_SHA}}
 ISTIO_ENVOY_DEBUG_URL=${ISTIO_ENVOY_DEBUG_URL:-https://storage.googleapis.com/istio-build/proxy/envoy-debug-${ISTIO_ENVOY_VERSION}.tar.gz}
 ISTIO_ENVOY_RELEASE_URL=${ISTIO_ENVOY_RELEASE_URL:-https://storage.googleapis.com/istio-build/proxy/envoy-alpha-${ISTIO_ENVOY_VERSION}.tar.gz}
+# TODO Change url when official envoy release for MAC is available
+ISTIO_ENVOY_MAC_RELEASE_URL=${ISTIO_ENVOY_MAC_RELEASE_URL:-https://storage.googleapis.com/istio-on-macos/releases/0.7.1/istio-proxy-0.7.1-macos.tar.gz}
 
 # Normally set by the Makefile.
 # Variables for the extracted debug/release Envoy artifacts.
 ISTIO_ENVOY_DEBUG_DIR=${ISTIO_ENVOY_DEBUG_DIR:-"${OUT_DIR}/${GOOS}_${GOARCH}/debug"}
-ISTIO_ENVOY_DEBUG_NAME=${ISTIO_ENVOY_DEBUG_NAME:-"envoy-debug-ISTIO_ENVOY_VERSION"}
+ISTIO_ENVOY_DEBUG_NAME=${ISTIO_ENVOY_DEBUG_NAME:-"envoy-debug-$ISTIO_ENVOY_VERSION"}
 ISTIO_ENVOY_DEBUG_PATH=${ISTIO_ENVOY_DEBUG_PATH:-"$ISTIO_ENVOY_DEBUG_DIR/$ISTIO_ENVOY_DEBUG_NAME"}
-ISTIO_ENVOY_RELEASE_DIR=${ISTIO_ENVOY_RELEASE_DIR:-"{OUT_DIR}/${GOOS}_${GOARCH}/release"}
-ISTIO_ENVOY_RELEASE_NAME=${ISTIO_ENVOY_RELEASE_NAME:-"envoy-ISTIO_ENVOY_VERSION"}
+ISTIO_ENVOY_RELEASE_DIR=${ISTIO_ENVOY_RELEASE_DIR:-"${OUT_DIR}/${GOOS}_${GOARCH}/release"}
+ISTIO_ENVOY_RELEASE_NAME=${ISTIO_ENVOY_RELEASE_NAME:-"envoy-$ISTIO_ENVOY_VERSION"}
 ISTIO_ENVOY_RELEASE_PATH=${ISTIO_ENVOY_RELEASE_PATH:-"$ISTIO_ENVOY_RELEASE_DIR/$ISTIO_ENVOY_RELEASE_NAME"}
+
+# Set the value of DOWNLOAD_COMMAND (either curl or wget)
+set_download_command
 
 # Save envoy in $ISTIO_ENVOY_DIR
 if [ ! -f "$ISTIO_ENVOY_DEBUG_PATH" ] || [ ! -f "$ISTIO_ENVOY_RELEASE_PATH" ] ; then
-    # Set the value of DOWNLOAD_COMMAND (either curl or wget)
-    set_download_command
+    # Clear out any old versions of Envoy.
+    rm -f ${ISTIO_OUT}/envoy ${ROOT}/pilot/pkg/proxy/envoy/envoy ${ISTIO_BIN}/envoy
 
     # Download debug envoy binary.
     mkdir -p $ISTIO_ENVOY_DEBUG_DIR
     pushd $ISTIO_ENVOY_DEBUG_DIR
+    if [ "$LOCAL_OS" == "Darwin" ] && [ "$GOOS" != "linux" ]; then
+       ISTIO_ENVOY_DEBUG_URL=${ISTIO_ENVOY_MAC_RELEASE_URL}
+    fi
     echo "Downloading envoy debug artifact: ${DOWNLOAD_COMMAND} ${ISTIO_ENVOY_DEBUG_URL}"
     time ${DOWNLOAD_COMMAND} ${ISTIO_ENVOY_DEBUG_URL} | tar xz
     cp usr/local/bin/envoy $ISTIO_ENVOY_DEBUG_PATH
@@ -129,36 +132,36 @@ if [ ! -f "$ISTIO_ENVOY_DEBUG_PATH" ] || [ ! -f "$ISTIO_ENVOY_RELEASE_PATH" ] ; 
     # Download release envoy binary.
     mkdir -p $ISTIO_ENVOY_RELEASE_DIR
     pushd $ISTIO_ENVOY_RELEASE_DIR
+    if [ "$LOCAL_OS" == "Darwin" ] && [ "$GOOS" != "linux" ]; then
+       ISTIO_ENVOY_RELEASE_URL=${ISTIO_ENVOY_MAC_RELEASE_URL}
+    fi
     echo "Downloading envoy release artifact: ${DOWNLOAD_COMMAND} ${ISTIO_ENVOY_RELEASE_URL}"
     time ${DOWNLOAD_COMMAND} ${ISTIO_ENVOY_RELEASE_URL} | tar xz
     cp usr/local/bin/envoy $ISTIO_ENVOY_RELEASE_PATH
     rm -rf usr
     popd
-
-    # Clear out any old versions of Envoy.
-    rm -f ${ISTIO_OUT}/envoy ${ROOT}/pilot/pkg/proxy/envoy/envoy ${ISTIO_BIN}/envoy
 fi
 
-# TODO(nmittler): Remove once tests no longer use the envoy binary directly.
-if [ ! -f ${ISTIO_OUT}/envoy ] ; then
-    mkdir -p ${ISTIO_OUT}
-    # Make sure the envoy binary exists. This is only used for tests, so use the debug binary.
-    cp ${ISTIO_ENVOY_DEBUG_PATH} ${ISTIO_OUT}/envoy
-fi
+mkdir -p ${ISTIO_OUT}
+mkdir -p ${ISTIO_BIN}
 
-if [ ! -f /usr/local/bin/helm -a ! -f ${ISTIO_OUT}/helm ] ; then
-    # Install helm. Please keep it in sync with .circleci
-    cd /tmp && \
-        curl -Lo /tmp/helm.tgz https://storage.googleapis.com/kubernetes-helm/helm-${HELM_VER}-linux-amd64.tar.gz && \
-        tar xfz helm.tgz && \
-        mv linux-amd64/helm ${ISTIO_OUT}/helm && \
-        rm -rf helm.tgz linux-amd64
-fi
-
-# TODO(nmittler): Remove once tests no longer use the envoy binary directly.
-# circleCI expects this in the bin directory
-if [ ! -f ${ISTIO_BIN}/envoy ] ; then
-    mkdir -p ${ISTIO_BIN}
+# copy debug envoy binary used for local tests such as ones in mixer/test/clients
+if [ "$LOCAL_OS" == "Darwin" ]; then
+    # Download darwin envoy binary.
+    DARWIN_ENVOY_DIR=$(mktemp -d)
+    pushd $DARWIN_ENVOY_DIR
+    echo "Downloading envoy darwin binary: ${DOWNLOAD_COMMAND} ${ISTIO_ENVOY_MAC_RELEASE_URL}"
+    time ${DOWNLOAD_COMMAND} ${ISTIO_ENVOY_MAC_RELEASE_URL} | tar xz
+    cp usr/local/bin/envoy ${ISTIO_OUT}/envoy
+    cp usr/local/bin/envoy ${ISTIO_BIN}/envoy
+    popd
+    rm -rf $DARWIN_ENVOY_DIR
+else
+    cp -f ${ISTIO_ENVOY_DEBUG_PATH} ${ISTIO_OUT}/envoy
+    # TODO(nmittler): Remove once tests no longer use the envoy binary directly.
+    # circleCI expects this in the bin directory
     # Make sure the envoy binary exists. This is only used for tests, so use the debug binary.
     cp ${ISTIO_ENVOY_DEBUG_PATH} ${ISTIO_BIN}/envoy
 fi
+
+${ROOT}/bin/init_helm.sh

@@ -15,6 +15,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"google.golang.org/grpc/stats"
 
 	"istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/version"
@@ -38,7 +40,7 @@ const (
 	versionPath = "/version"
 )
 
-func startMonitor(port uint16, enableProfiling bool) (*monitor, error) {
+func startMonitor(port uint16, enableProfiling bool, lf listenFunc) (*monitor, error) {
 	m := &monitor{
 		closed: make(chan struct{}),
 	}
@@ -46,7 +48,7 @@ func startMonitor(port uint16, enableProfiling bool) (*monitor, error) {
 	// get the network stuff setup
 	var listener net.Listener
 	var err error
-	if listener, err = net.Listen("tcp", fmt.Sprintf(":%d", port)); err != nil {
+	if listener, err = lf("tcp", fmt.Sprintf(":%d", port)); err != nil {
 		return nil, fmt.Errorf("unable to listen on socket: %v", err)
 	}
 
@@ -101,4 +103,44 @@ L:
 		}
 	}
 	return err
+}
+
+type multiStatsHandler struct {
+	handlers []stats.Handler
+}
+
+// HandleRPC processes the RPC stats.
+func (m *multiStatsHandler) HandleRPC(ctx context.Context, rs stats.RPCStats) {
+	for _, h := range m.handlers {
+		h.HandleRPC(ctx, rs)
+	}
+}
+
+// TagRPC can attach some information to the given context.
+func (m *multiStatsHandler) TagRPC(ctx context.Context, rti *stats.RPCTagInfo) context.Context {
+	c := ctx
+	for _, h := range m.handlers {
+		c = h.TagRPC(c, rti)
+	}
+	return c
+}
+
+// TagConn can attach some information to the given context.
+func (m *multiStatsHandler) TagConn(ctx context.Context, cti *stats.ConnTagInfo) context.Context {
+	c := ctx
+	for _, h := range m.handlers {
+		c = h.TagConn(c, cti)
+	}
+	return c
+}
+
+// HandleConn processes the Conn stats.
+func (m *multiStatsHandler) HandleConn(ctx context.Context, cs stats.ConnStats) {
+	for _, h := range m.handlers {
+		h.HandleConn(ctx, cs)
+	}
+}
+
+func newMultiStatsHandler(handlers ...stats.Handler) stats.Handler {
+	return &multiStatsHandler{handlers: handlers}
 }

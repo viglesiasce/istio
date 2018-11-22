@@ -17,10 +17,8 @@ package util
 import (
 	"fmt"
 	"strings"
-	"testing"
 	"time"
-	// TODO(nmittler): Remove this
-	_ "github.com/golang/glog"
+
 	"k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -121,6 +119,17 @@ func CopyPodFiles(container, pod, ns, source, dest string) {
 	log.Errorf("%s\n%s", cmd, output)
 }
 
+// CopyFilesToPod copies files from a machine to a pod.
+func CopyFilesToPod(container, pod, ns, source, dest string) error {
+	// kubectl cp /tmp/bar  <some-namespace>/<some-pod>:/tmp/foo -c container
+	cmd := fmt.Sprintf("kubectl cp %s %s/%s:%s", source, ns, pod, dest)
+	if container != "" {
+		cmd += " -c " + container
+	}
+	_, err := Shell(cmd)
+	return err
+}
+
 // GetAppPods awaits till all pods are running in a namespace, and returns a map
 // from "app" label value to the pod names.
 func GetAppPods(cl kubernetes.Interface, kubeconfig string, nslist []string) (map[string][]string, error) {
@@ -210,18 +219,4 @@ func FetchLogs(cl kubernetes.Interface, name, namespace string, container string
 		}
 	}
 	return string(raw)
-}
-
-// Eventually retries until f() returns true, or it times out in error
-func Eventually(f func() bool, t *testing.T) {
-	interval := 64 * time.Millisecond
-	for i := 0; i < 10; i++ {
-		if f() {
-			return
-		}
-		log.Infof("Sleeping %v", interval)
-		time.Sleep(interval)
-		interval = 2 * interval
-	}
-	t.Errorf("Failed to satisfy function")
 }

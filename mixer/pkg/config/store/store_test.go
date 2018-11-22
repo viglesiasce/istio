@@ -19,6 +19,9 @@ import (
 	"net/url"
 	"reflect"
 	"testing"
+	"time"
+
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	"github.com/gogo/protobuf/proto"
 
@@ -47,6 +50,10 @@ func (t *testStore) Init(kinds []string) error {
 	return t.initErr
 }
 
+func (t *testStore) WaitForSynced(time.Duration) error {
+	return nil
+}
+
 func (t *testStore) Get(key Key) (*BackEndResource, error) {
 	t.calledKey = key
 	return t.getResponse, t.getError
@@ -72,7 +79,7 @@ func newTestBackend() *testStore {
 }
 
 func registerTestStore(builders map[string]Builder) {
-	builders["test"] = func(u *url.URL) (Backend, error) {
+	builders["test"] = func(u *url.URL, gv *schema.GroupVersion, ck []string) (Backend, error) {
 		return newTestBackend(), nil
 	}
 }
@@ -86,10 +93,9 @@ func TestStore(t *testing.T) {
 	}
 	defer s.Stop()
 
-	k := Key{Kind: "Handler", Name: "name", Namespace: "ns"}
 	b.getError = ErrNotFound
-	h1 := &cfg.Handler{}
-	if err := s.Get(k, h1); err != ErrNotFound {
+	k := Key{Kind: "Handler", Name: "name", Namespace: "ns"}
+	if _, err := s.Get(k); err != ErrNotFound {
 		t.Errorf("Got %v, Want ErrNotFound", err)
 	}
 	if b.calledKey != k {
@@ -103,12 +109,14 @@ func TestStore(t *testing.T) {
 		Spec:     map[string]interface{}{"name": "default", "adapter": "noop"},
 	}
 	b.getResponse = bres
-	if err := s.Get(k, h1); err != nil {
+	var r1 *Resource
+	var err error
+	if r1, err = s.Get(k); err != nil {
 		t.Errorf("Got %v, Want nil", err)
 	}
 	want := &cfg.Handler{Name: "default", Adapter: "noop"}
-	if !reflect.DeepEqual(h1, want) {
-		t.Errorf("Got %v, Want %v", h1, want)
+	if !reflect.DeepEqual(r1.Spec, want) {
+		t.Errorf("Got %v, Want %v", r1, want)
 	}
 
 	b.listResponse[k] = bres
@@ -206,6 +214,7 @@ func TestStoreFail(t *testing.T) {
 }
 
 func TestRegistry(t *testing.T) {
+	groupVersion := &schema.GroupVersion{Group: "config.istio.io", Version: "v1alpha2"}
 	r := NewRegistry(registerTestStore)
 	for _, c := range []struct {
 		u  string
@@ -217,7 +226,7 @@ func TestRegistry(t *testing.T) {
 		{"://", false},
 		{"test://", true},
 	} {
-		_, err := r.NewStore(c.u)
+		_, err := r.NewStore(c.u, groupVersion, []string{})
 		ok := err == nil
 		if ok != c.ok {
 			t.Errorf("Want %v, Got %v, Err %v", c.ok, ok, err)

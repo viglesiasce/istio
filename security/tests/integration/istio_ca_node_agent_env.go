@@ -17,11 +17,11 @@ package integration
 import (
 	"fmt"
 
-	"github.com/golang/glog"
 	"k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"istio.io/istio/pilot/pkg/serviceregistry/kube"
+	"istio.io/istio/pkg/log"
 	"istio.io/istio/tests/integration/framework"
 )
 
@@ -39,7 +39,7 @@ type (
 )
 
 const (
-	istioCaWithGivenCertificate = "istio-ca-with-given-certificate"
+	citadelWithGivenCertificate = "citadel-with-given-certificate"
 	nodeAgent                   = "node-agent"
 	nodeAgentService            = "node-agent-service"
 	podGroupPostfix             = "-pod-group"
@@ -49,13 +49,13 @@ const (
 func NewNodeAgentTestEnv(name, kubeConfig, hub, tag string) *NodeAgentTestEnv {
 	clientset, err := CreateClientset(kubeConfig)
 	if err != nil {
-		glog.Errorf("failed to initialize K8s client: %v", err)
+		log.Errorf("failed to initialize K8s client: %v", err)
 		return nil
 	}
 
 	namespace, err := createTestNamespace(clientset, testNamespacePrefix)
 	if err != nil {
-		glog.Errorf("failed to create test namespace: %v", err)
+		log.Errorf("failed to create test namespace: %v", err)
 		return nil
 	}
 
@@ -82,19 +82,19 @@ func (env *NodeAgentTestEnv) GetComponents() []framework.Component {
 			NewKubernetesPod(
 				env.ClientSet,
 				env.NameSpace,
-				istioCaWithGivenCertificate,
-				fmt.Sprintf("%v/istio-ca-test:%v", env.Hub, env.Tag),
+				citadelWithGivenCertificate,
+				fmt.Sprintf("%v/citadel-test:%v", env.Hub, env.Tag),
 				[]string{},
 				[]string{},
 			),
 			NewKubernetesService(
 				env.ClientSet,
 				env.NameSpace,
-				"istio-ca",
+				"istio-citadel",
 				v1.ServiceTypeClusterIP,
 				8060,
 				map[string]string{
-					"pod-group": istioCaWithGivenCertificate + podGroupPostfix,
+					"pod-group": citadelWithGivenCertificate + podGroupPostfix,
 				},
 				map[string]string{
 					kube.KubeServiceAccountsOnVMAnnotation: "nodeagent.google.com",
@@ -133,11 +133,11 @@ func (env *NodeAgentTestEnv) Bringup() error {
 // Cleanup clean everything created by this test environment, not component level
 // Cleanup() is being called in framework.TearDown()
 func (env *NodeAgentTestEnv) Cleanup() error {
-	glog.Infof("cleaning up environment...")
+	log.Infof("cleaning up environment...")
 	err := deleteTestNamespace(env.ClientSet, env.NameSpace)
 	if err != nil {
 		retErr := fmt.Errorf("failed to delete namespace: %v error: %v", env.NameSpace, err)
-		glog.Error(retErr)
+		log.Errorf("%v", retErr)
 		return retErr
 	}
 	return nil

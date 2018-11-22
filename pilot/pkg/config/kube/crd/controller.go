@@ -18,10 +18,11 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"time"
-	// TODO(nmittler): Remove this
-	_ "github.com/golang/glog"
-	multierror "github.com/hashicorp/go-multierror"
+
+	"github.com/prometheus/client_golang/prometheus"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
@@ -45,6 +46,27 @@ type cacheHandler struct {
 	handler  *kube.ChainHandler
 }
 
+var (
+	// experiment on getting some monitoring on config errors.
+	k8sEvents = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "pilot_k8s_cfg_events",
+		Help: "Events from k8s config.",
+	}, []string{"type", "event"})
+
+	k8sErrors = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "pilot_k8s_object_errors",
+		Help: "Errors converting k8s CRDs",
+	}, []string{"name"})
+
+	// InvalidCRDs contains a sync.Map keyed by the namespace/name of the entry, and has the error as value.
+	// It can be used by tools like ctrlz to display the errors.
+	InvalidCRDs atomic.Value
+)
+
+func init() {
+	prometheus.MustRegister(k8sEvents)
+}
+
 // NewController creates a new Kubernetes controller for CRDs
 // Use "" for namespace to listen for all namespace changes
 func NewController(client *Client, options kube.ControllerOptions) model.ConfigStoreCache {
@@ -66,24 +88,36 @@ func NewController(client *Client, options kube.ControllerOptions) model.ConfigS
 }
 
 func (c *controller) addInformer(schema model.ProtoSchema, namespace string, resyncPeriod time.Duration) {
-	c.kinds[schema.Type] = c.createInformer(knownTypes[schema.Type].object.DeepCopyObject(), resyncPeriod,
+	c.kinds[schema.Type] = c.createInformer(knownTypes[schema.Type].object.DeepCopyObject(), schema.Type, resyncPeriod,
 		func(opts meta_v1.ListOptions) (result runtime.Object, err error) {
 			result = knownTypes[schema.Type].collection.DeepCopyObject()
-			err = c.client.dynamic.Get().
-				Namespace(namespace).
+			rc, ok := c.client.clientset[apiVersion(&schema)]
+			if !ok {
+				return nil, fmt.Errorf("client not initialized %s", schema.Type)
+			}
+			req := rc.dynamic.Get().
 				Resource(ResourceName(schema.Plural)).
-				VersionedParams(&opts, meta_v1.ParameterCodec).
-				Do().
-				Into(result)
+				VersionedParams(&opts, meta_v1.ParameterCodec)
+
+			if !schema.ClusterScoped {
+				req = req.Namespace(namespace)
+			}
+			err = req.Do().Into(result)
 			return
 		},
 		func(opts meta_v1.ListOptions) (watch.Interface, error) {
-			return c.client.dynamic.Get().
+			rc, ok := c.client.clientset[apiVersion(&schema)]
+			if !ok {
+				return nil, fmt.Errorf("client not initialized %s", schema.Type)
+			}
+			req := rc.dynamic.Get().
 				Prefix("watch").
-				Namespace(namespace).
 				Resource(ResourceName(schema.Plural)).
-				VersionedParams(&opts, meta_v1.ParameterCodec).
-				Watch()
+				VersionedParams(&opts, meta_v1.ParameterCodec)
+			if !schema.ClusterScoped {
+				req = req.Namespace(namespace)
+			}
+			return req.Watch()
 		})
 }
 
@@ -102,6 +136,7 @@ func (c *controller) notify(obj interface{}, event model.Event) error {
 
 func (c *controller) createInformer(
 	o runtime.Object,
+	otype string,
 	resyncPeriod time.Duration,
 	lf cache.ListFunc,
 	wf cache.WatchFunc) cacheHandler {
@@ -117,14 +152,19 @@ func (c *controller) createInformer(
 		cache.ResourceEventHandlerFuncs{
 			// TODO: filtering functions to skip over un-referenced resources (perf)
 			AddFunc: func(obj interface{}) {
+				k8sEvents.With(prometheus.Labels{"type": otype, "event": "add"}).Add(1)
 				c.queue.Push(kube.NewTask(handler.Apply, obj, model.EventAdd))
 			},
 			UpdateFunc: func(old, cur interface{}) {
 				if !reflect.DeepEqual(old, cur) {
+					k8sEvents.With(prometheus.Labels{"type": otype, "event": "update"}).Add(1)
 					c.queue.Push(kube.NewTask(handler.Apply, cur, model.EventUpdate))
+				} else {
+					k8sEvents.With(prometheus.Labels{"type": otype, "event": "updateSame"}).Add(1)
 				}
 			},
 			DeleteFunc: func(obj interface{}) {
+				k8sEvents.With(prometheus.Labels{"type": otype, "event": "add"}).Add(1)
 				c.queue.Push(kube.NewTask(handler.Apply, obj, model.EventDelete))
 			},
 		})
@@ -142,7 +182,7 @@ func (c *controller) RegisterEventHandler(typ string, f func(model.Config, model
 		if ok {
 			config, err := ConvertObject(schema, item, c.client.domainSuffix)
 			if err != nil {
-				log.Warnf("error translating object %#v", object)
+				log.Warnf("error translating object for schema %#v : %v\n Object:\n%#v", schema, err, object)
 			} else {
 				f(*config, ev)
 			}
@@ -224,8 +264,16 @@ func (c *controller) List(typ, namespace string) ([]model.Config, error) {
 		return nil, fmt.Errorf("missing type %q", typ)
 	}
 
+	var newErrors sync.Map
 	var errs error
 	out := make([]model.Config, 0)
+	oldMap := InvalidCRDs.Load()
+	if oldMap != nil {
+		oldMap.(*sync.Map).Range(func(key, value interface{}) bool {
+			k8sErrors.With(prometheus.Labels{"name": key.(string)}).Set(1)
+			return true
+		})
+	}
 	for _, data := range c.kinds[typ].informer.GetStore().List() {
 		item, ok := data.(IstioObject)
 		if !ok {
@@ -238,10 +286,17 @@ func (c *controller) List(typ, namespace string) ([]model.Config, error) {
 
 		config, err := ConvertObject(schema, item, c.client.domainSuffix)
 		if err != nil {
-			errs = multierror.Append(errs, err)
+			key := item.GetObjectMeta().Namespace + "/" + item.GetObjectMeta().Name
+			log.Errorf("Failed to convert %s object, ignoring: %s %v %v", typ, key, err, item.GetSpec())
+			// DO NOT RETURN ERROR: if a single object is bad, it'll be ignored (with a log message), but
+			// the rest should still be processed.
+			// TODO: find a way to reset and represent the error !!
+			newErrors.Store(key, err)
+			k8sErrors.With(prometheus.Labels{"name": key}).Set(1)
 		} else {
 			out = append(out, *config)
 		}
 	}
+	InvalidCRDs.Store(&newErrors)
 	return out, errs
 }

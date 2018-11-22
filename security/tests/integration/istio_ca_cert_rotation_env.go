@@ -17,9 +17,9 @@ package integration
 import (
 	"fmt"
 
-	"github.com/golang/glog"
 	"k8s.io/client-go/kubernetes"
 
+	"istio.io/istio/pkg/log"
 	"istio.io/istio/tests/integration/framework"
 )
 
@@ -37,20 +37,20 @@ type (
 )
 
 const (
-	istioCaSelfSignedShortTTL = "istio-ca-self-signed-short-ttl"
+	citadelSelfSignedShortTTL = "citadel-self-signed-short-ttl"
 )
 
 // NewCertRotationTestEnv creates the environment instance
 func NewCertRotationTestEnv(name, kubeConfig, hub, tag string) *CertRotationTestEnv {
 	clientset, err := CreateClientset(kubeConfig)
 	if err != nil {
-		glog.Errorf("failed to initialize K8s client: %v", err)
+		log.Errorf("failed to initialize K8s client: %v", err)
 		return nil
 	}
 
 	namespace, err := createTestNamespace(clientset, testNamespacePrefix)
 	if err != nil {
-		glog.Errorf("failed to create test namespace: %v", err)
+		log.Errorf("failed to create test namespace: %v", err)
 		return nil
 	}
 
@@ -77,8 +77,8 @@ func (env *CertRotationTestEnv) GetComponents() []framework.Component {
 			NewKubernetesPod(
 				env.ClientSet,
 				env.NameSpace,
-				istioCaSelfSignedShortTTL,
-				fmt.Sprintf("%s/istio-ca:%s", env.Hub, env.Tag),
+				citadelSelfSignedShortTTL,
+				fmt.Sprintf("%s/citadel:%s", env.Hub, env.Tag),
 				[]string{
 					"/usr/local/bin/istio_ca",
 				},
@@ -101,11 +101,11 @@ func (env *CertRotationTestEnv) Bringup() error {
 // Cleanup clean everything created by this test environment, not component level
 // Cleanup() is being called in framework.TearDown()
 func (env *CertRotationTestEnv) Cleanup() error {
-	glog.Infof("cleaning up environment...")
+	log.Infof("cleaning up environment...")
 	err := deleteTestNamespace(env.ClientSet, env.NameSpace)
 	if err != nil {
 		retErr := fmt.Errorf("failed to delete the namespace: %v error: %v", env.NameSpace, err)
-		glog.Error(retErr)
+		log.Errorf("%v", retErr)
 		return retErr
 	}
 	return nil
